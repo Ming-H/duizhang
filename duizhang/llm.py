@@ -26,6 +26,12 @@ def _client():
     )
 
 
+def _max_tokens(default: int) -> int:
+    """DZ_LLM_MAX_TOKENS 可覆盖：重思考模型（如 GLM）的 reasoning token
+    计入 max_tokens，默认值会被思考吃光导致正文为空。"""
+    return int(os.environ.get("DZ_LLM_MAX_TOKENS", default))
+
+
 def chat_json(system: str, user: str, max_tokens: int = 512) -> dict:
     """要求 JSON 输出的单轮调用；解析失败抛 ValueError 由调用节点降级。"""
     model = os.environ.get("DZ_LLM_MODEL", "deepseek-chat")
@@ -34,7 +40,7 @@ def chat_json(system: str, user: str, max_tokens: int = 512) -> dict:
         messages=[{"role": "system", "content": system},
                   {"role": "user", "content": user}],
         temperature=0,
-        max_tokens=max_tokens,
+        max_tokens=_max_tokens(max_tokens),
         response_format={"type": "json_object"},
     )
     raw = resp.choices[0].message.content or "{}"
@@ -48,6 +54,6 @@ def chat_text(system: str, user: str, max_tokens: int = 800) -> str:
         messages=[{"role": "system", "content": system},
                   {"role": "user", "content": user}],
         temperature=0.2,
-        max_tokens=max_tokens,
+        max_tokens=_max_tokens(max_tokens),
     )
     return resp.choices[0].message.content or ""

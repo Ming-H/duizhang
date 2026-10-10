@@ -21,17 +21,27 @@ def _sentences(text: str) -> list[str]:
     return [s.strip() for s in _SENT_SPLIT.split(text) if len(s.strip()) >= 6]
 
 
+# 文档元词：财报里每句都带（公司/报告期/年份），作为重叠信号只有噪声
+_META_WORDS = {"公司", "股份", "报告", "年度", "半年度", "季度", "一季", "三季",
+               "情况", "说明", "有限公司", "证券", "代码", "简称", "公告", "编号"}
+
+
+def _content_tokens(toks) -> set:
+    return {t for t in toks
+            if t not in _META_WORDS and not re.fullmatch(r"20\d{2}", t)}
+
+
 def extractive_answer(state: GraphState, hits: list[Retrieved],
                       max_sents: int = 4) -> tuple[str, list[str]]:
-    """从 top 命中块抽证据句：句与 query 的重叠分 + 位置先验。"""
-    q = set(word_tokens(state["effective_query"]))
+    """从 top 命中块抽证据句：与 query 的内容词重叠（元词不计分）+ 领域加权。"""
+    q = _content_tokens(word_tokens(state["effective_query"]))
     # 问「原因/变动」时给归因句加权：财报的因果句式是「主要系…影响」「主要由于…所致」
     wants_reason = any(w in state["query"] for w in ("原因", "为什么", "为何", "变动"))
     _REASON_PAT = re.compile(r"主要系|主要因|主要由于|所致|影响")
     scored = []
     for h in hits[:6]:   # 扫前6：归因句常在 4 名开外，靠加分顶上来
         for s in _sentences(h.chunk.text):
-            stoks = set(word_tokens(s)) | set(word_tokens(h.chunk.text[:40]))
+            stoks = _content_tokens(set(word_tokens(s)) | set(word_tokens(h.chunk.text[:40])))
             overlap = len(q & stoks)
             # 数字句优先（财报问答大多数时候在问数字）
             has_num = bool(re.search(r"\d", s)) or bool(h.chunk.num_notes)

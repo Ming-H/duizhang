@@ -44,6 +44,7 @@ METRIC_SYNONYMS = {
     "净利": ["净利润", "归属于上市公司股东的净利润"],
     "毛利": ["毛利率", "营业成本"],
     "市值": ["总市值", "市值"],
+    "在手": ["手持"],
     "eps": ["基本每股收益", "每股收益"],
     "roe": ["加权平均净资产收益率", "净资产收益率"],
 }
@@ -171,12 +172,38 @@ def read_md(path: str | Path) -> list[str]:
     return [text]
 
 
+def strip_boilerplate(pages: list[str], page_count: int) -> list[str]:
+    """页眉/页脚剥离：在 ≥30% 页面逐字重复的短行是装订噪声（公司名+报告标题、
+    页码等）。经典文档级频率分析（trafilatura 同思路），只对多页 PDF 生效。"""
+    if page_count < 6:
+        return pages
+    from collections import Counter
+
+    def _norm(ln: str) -> str:
+        return re.sub(r"\s+", "", ln)
+
+    freq = Counter()
+    for pt in pages:
+        for ln in {l.strip() for l in pt.splitlines() if l.strip()}:
+            freq[_norm(ln)] += 1
+    threshold = max(2, int(page_count * 0.3))
+    # 归一化后比对：PDF 抽取的空格位置逐页漂移（2026年/2026 年），
+    # 逐字比对会让页眉逃逸
+    boiler = {n for n, c in freq.items()
+              if c >= threshold and 8 <= len(n) <= 60}
+    if not boiler:
+        return pages
+    return ["\n".join(l for l in pt.splitlines()
+                       if _norm(l.strip()) not in boiler)
+            for pt in pages]
+
+
 def ingest_file(path: str | Path) -> tuple[Doc, list[Chunk]]:
     company, period, kind = parse_filename(path)
     doc_id = f"{company}_{period}"
     src = str(path)
     if str(path).lower().endswith(".pdf"):
-        pages = read_pdf(path)
+        pages = strip_boilerplate(read_pdf(path), len(read_pdf(path)))
     else:
         pages = read_md(path)   # md 与 txt 同走纯文本通道
 

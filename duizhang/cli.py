@@ -97,6 +97,9 @@ def cmd_ingest(args):
                 doc, chunks = ingest_file(path)
                 if doc.doc_id in corp.docs:          # 撞 doc_id：按更新处理
                     corp.chunks = [c for c in corp.chunks if c.doc_id != doc.doc_id]
+                    # 旧块 SQL 行必须先删：块序号随重摄取变化，旧 id 的行
+                    # 不会被 INSERT OR REPLACE 覆盖 → 新旧块并存、检索命中幽灵旧块
+                    con.execute("DELETE FROM chunks WHERE doc_id=?", (doc.doc_id,))
                 corp.docs[doc.doc_id] = doc
                 corp.chunks.extend(chunks)
                 for c in chunks:
