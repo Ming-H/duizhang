@@ -19,6 +19,9 @@ from pypdf import PdfReader
 
 from duizhang.schemas import Chunk, Doc
 
+# 研报：20260703-东吴证券-并行科技-920493-标题.pdf → (券商, 日期, 研报)
+_REPORT_PAT = re.compile(r"^(\d{8})-([^-]+)-(.+)\.pdf$")
+
 # 文件名 → (period, kind)
 _PERIOD_PAT = [
     (re.compile(r"(\d{4})年年度报告"), "FY"),
@@ -30,7 +33,8 @@ _PERIOD_PAT = [
 ]
 
 _KIND_LABEL = {"FY": "年报", "H1": "半年报", "Q1": "一季报", "Q3": "三季报",
-               "H1E": "半年度业绩预告", "Q3E": "三季度业绩预告", "ANALYSIS": "分析"}
+               "H1E": "半年度业绩预告", "Q3E": "三季度业绩预告",
+               "ANALYSIS": "分析", "研报": "研报"}
 
 # 指标同义词：查询扩展用（检索前把口语指标名映射到财报术语）
 METRIC_SYNONYMS = {
@@ -46,16 +50,24 @@ METRIC_SYNONYMS = {
 
 
 def parse_filename(path: str | Path) -> tuple[str, str, str]:
-    """从文件名解析 (company, period, kind)。分析类 MD 归 kind=ANALYSIS。"""
+    """从文件名解析 (company, period, kind)。
+
+    三类通道：① 财报（公司_报告期类型）② 券商研报（日期-券商-标题）
+    ③ 兜底（company=文件名主干，kind=ANALYSIS/文本）。
+    """
     name = Path(path).stem
+    m = _REPORT_PAT.match(Path(path).name)
+    if m:
+        date, broker, _title = m.group(1), m.group(2), m.group(3)
+        return broker, date, "研报"
     for pat, tag in _PERIOD_PAT:
         m = pat.search(name)
         if m:
             company = pat.sub("", name).rstrip("_－- ")
             return company, f"{m.group(1)}{tag}", _KIND_LABEL[tag]
-    # 兜底：公司_分析 / 任意 md
+    # 兜底：公司_分析 / 裸 txt
     company = re.split(r"[__－-]", name)[0]
-    return company, "MD", "ANALYSIS"
+    return company, "TXT" if Path(path).suffix.lower() == ".txt" else "MD", "ANALYSIS"
 
 
 # ── 数字归一化（句读基因） ──────────────────────────────
@@ -166,7 +178,7 @@ def ingest_file(path: str | Path) -> tuple[Doc, list[Chunk]]:
     if str(path).lower().endswith(".pdf"):
         pages = read_pdf(path)
     else:
-        pages = read_md(path)
+        pages = read_md(path)   # md 与 txt 同走纯文本通道
 
     doc = Doc(doc_id=doc_id, company=company, period=period,
               kind=kind, source=src, n_pages=len(pages))

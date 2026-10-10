@@ -64,7 +64,7 @@ def make_nodes(corpus: Corpus):
             except Exception:
                 pass  # LLM 失败静默降级到规则
         # 摘要意图优先判定：否则「总结业绩预告」会被「预告」劫持到 metric
-        if any(w in q for w in ("总结", "摘要", "概览", "要点", "怎么样", "如何看")):
+        if any(w in q for w in ("总结", "摘要", "概览", "要点", "怎么样", "如何看", "怎么看", "观点")):
             return {**state, "route": "summary", "route_reason": "命中摘要词",
                     "trace": ["route:summary"]}
         # 期间守卫：query 里的年份若库中全无对应报告，先对账再回答——拒。

@@ -88,6 +88,14 @@ class SparseBM25:
         return scores
 
 
+def _fingerprint(chunks: list[Chunk]) -> str:
+    import hashlib
+    h = hashlib.sha1()
+    for c in chunks:
+        h.update(c.chunk_id.encode())
+    return h.hexdigest()[:16]
+
+
 class Corpus:
     """chunk 库 + 双路 BM25 索引。"""
 
@@ -181,8 +189,15 @@ class Corpus:
         con.commit()
         con.close()
 
+    # ── 索引缓存：pickle 只是缓存，删了也能跑（重建 117s@60万块） ──
+    def save_index(self, idx_path: str | Path) -> None:
+        import pickle
+        with open(idx_path, "wb") as f:
+            pickle.dump({"fp": _fingerprint(self.chunks),
+                         "word": self._bm25_word, "char": self._bm25_char}, f)
+
     @classmethod
-    def load(cls, db_path: str | Path) -> "Corpus":
+    def load(cls, db_path: str | Path, idx_path: str | Path | None = None) -> "Corpus":
         corp = cls()
         con = sqlite3.connect(str(db_path))
         try:
@@ -196,7 +211,23 @@ class Corpus:
                                           "is_table,num_notes FROM chunks")]
             for i, c in enumerate(corp.chunks):
                 corp._by_doc.setdefault(c.doc_id, []).append(i)
+            if idx_path and Path(idx_path).exists():
+                try:
+                    import pickle
+                    with open(idx_path, "rb") as f:
+                        cached = pickle.load(f)
+                    if cached.get("fp") == _fingerprint(corp.chunks):
+                        corp._bm25_word = cached["word"]
+                        corp._bm25_char = cached["char"]
+                        return corp
+                except Exception:
+                    pass          # 缓存损坏 → 重建，行为不变只是慢一次
             corp._rebuild()
+            if idx_path:
+                try:
+                    corp.save_index(idx_path)
+                except Exception:
+                    pass
         finally:
             con.close()
         return corp
