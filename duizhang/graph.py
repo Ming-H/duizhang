@@ -187,15 +187,20 @@ def make_nodes(corpus: Corpus):
         return {**state, "answer": body, "citations": cited,
                 "trace": ["generate:extractive"]}
 
-    MIN_SUMMARY_SCORE = 0.02   # 单路弱匹配 <0.02，双路真匹配 >0.03
+    MIN_SUMMARY_SCORE = 0.028  # 单路弱匹配 <0.026（60万块上垃圾词也能凑出），双路真匹配 >0.03
 
     def summarize_doc(state: GraphState) -> GraphState:
         filt = _doc_filter(state["query"])
         target = None
+        from duizhang.index import word_tokens as _wt
+        q_toks = set(_wt(state["query"])) - {"怎么样", "怎么看", "如何", "观点", "总结", "摘要"}
+        # 域词守卫：遍历前6命中，找到「分数达标 且 ≥2 词元重叠」的第一个；
+        # 第一名可能是无关键词的偶然块（字级 bigram 撞出来的分数）。
         for h in corpus.search(expand_query(state["query"]), k=6, doc_filter=filt):
-            if h.score >= MIN_SUMMARY_SCORE:
+            overlap = len(q_toks & set(_wt(h.chunk.text[:300])))
+            if h.score >= MIN_SUMMARY_SCORE and overlap >= 2:
                 target = h.chunk.doc_id
-            break
+                break
         if target is None:
             return refuse(state)
         doc_chunks = [c for c in corpus.chunks if c.doc_id == target][:12]

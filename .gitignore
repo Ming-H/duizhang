@@ -6,3 +6,4 @@ duizhang.db
 .DS_Store
 
 data/
+*.idx.pkl
