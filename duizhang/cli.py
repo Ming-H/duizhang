@@ -45,6 +45,14 @@ def cmd_ingest(args):
         con = sqlite3.connect(DB)
         con.execute("CREATE TABLE IF NOT EXISTS manifest "
                     "(path TEXT PRIMARY KEY, doc_id TEXT, fingerprint TEXT, ingested_at TEXT)")
+        # 增量路径也可能面对全新 DB：docs/chunks 表必须在此建（此前只建 manifest，
+        # 全新库 INSERT 全部静默失败，最终打出「无变化」的假象）
+        con.execute("CREATE TABLE IF NOT EXISTS docs "
+                    "(doc_id TEXT PRIMARY KEY, company TEXT, period TEXT, kind TEXT,"
+                    " source TEXT, n_pages INT)")
+        con.execute("CREATE TABLE IF NOT EXISTS chunks "
+                    "(chunk_id TEXT PRIMARY KEY, doc_id TEXT, page INT, seq INT,"
+                    " text TEXT, is_table INT, num_notes TEXT)")
         con.commit()
 
         scanned = source.scan(src)
@@ -109,6 +117,10 @@ def cmd_ingest(args):
         con.commit()
         con.close()
 
+        if failed:
+            print(f"  ⚠ 失败 {len(failed)}：")
+            for p_, e in failed[:3]:
+                print(f"  ✗ {p_}: {e}")
         # 零变更：不动索引（否则每次幂等运行都白付 117s 重建 + 1GB pickle）
         if not (n_new or n_upd or to_delete or dropped):
             print(f"= 无变化  {len(corp.docs)} docs / {len(corp.chunks)} chunks")
@@ -121,10 +133,7 @@ def cmd_ingest(args):
         if getattr(args, "rebuild", False):
             corp.save(DB)
         print(f"+{n_new} 新增  ~{n_upd} 更新  -{len(to_delete)} 删除  "
-              f"→ {len(corp.docs)} docs / {len(corp.chunks)} chunks"
-              f"{f'  失败{len(failed)}' if failed else ''}")
-        for p_, e in failed[:3]:
-            print(f"  ✗ {p_}: {e}")
+              f"→ {len(corp.docs)} docs / {len(corp.chunks)} chunks")
 
     if getattr(args, "watch", False):
         print(f"watch 模式：每 60s 增量同步 {args.path}（Ctrl-C 退出）")
