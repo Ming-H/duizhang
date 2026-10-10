@@ -25,6 +25,9 @@ def extractive_answer(state: GraphState, hits: list[Retrieved],
                       max_sents: int = 4) -> tuple[str, list[str]]:
     """从 top 命中块抽证据句：句与 query 的重叠分 + 位置先验。"""
     q = set(word_tokens(state["effective_query"]))
+    # 问「原因/变动」时给归因句加权：财报的因果句式是「主要系…影响」「主要由于…所致」
+    wants_reason = any(w in state["query"] for w in ("原因", "为什么", "为何", "变动"))
+    _REASON_PAT = re.compile(r"主要系|主要因|主要由于|所致|影响")
     scored = []
     for h in hits[:4]:
         for s in _sentences(h.chunk.text):
@@ -33,6 +36,8 @@ def extractive_answer(state: GraphState, hits: list[Retrieved],
             # 数字句优先（财报问答大多数时候在问数字）
             has_num = bool(re.search(r"\d", s)) or bool(h.chunk.num_notes)
             score = overlap * (1.4 if has_num else 1.0) + (0.2 if h.chunk.num_notes else 0.0)
+            if wants_reason and _REASON_PAT.search(s):
+                score += 1.5
             scored.append((score, s, h.chunk))
     scored.sort(key=lambda x: -x[0])
     picked, cited = [], []

@@ -32,12 +32,24 @@ def cmd_ingest(args):
     src = Path(args.path)
     files = sorted(list(src.rglob("*.pdf")) + list(src.rglob("*.md"))) \
         if src.is_dir() else [src]
-    for f in files:
-        doc, chunks = ingest_file(f)
-        corp.add(doc, chunks)
-        print(f"+ {doc.doc_id:<24} {doc.kind:<8} {doc.n_pages:>3}页 → {len(chunks)} 块")
+    failed = []
+    for i, f in enumerate(files, 1):
+        try:
+            doc, chunks = ingest_file(f)
+            if doc.doc_id in corp.docs:      # 同公司同期重复文件：跳过
+                continue
+            corp.add(doc, chunks, rebuild=False)
+        except Exception as e:
+            failed.append((str(f), str(e)[:60]))
+        if i % 50 == 0:
+            print(f"  … {i}/{len(files)}  ({len(corp.docs)} docs, {len(corp.chunks)} chunks)")
+    corp.finalize()
     corp.save(DB)
     print(f"\n共 {len(corp.docs)} 文档 / {len(corp.chunks)} 块 → {DB}")
+    if failed:
+        print(f"失败 {len(failed)} 个文件（已跳过）：")
+        for f, e in failed[:5]:
+            print(f"  ✗ {f}: {e}")
 
 
 def cmd_ask(args):

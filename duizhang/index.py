@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
 from pathlib import Path
 
 import jieba
@@ -22,12 +23,14 @@ _TOKEN_STRIP = re.compile(r"[\s，。；：、！？（）()《》【】\[\]{}\"
 
 
 def word_tokens(text: str) -> list[str]:
-    return [t for t in _CUT(text) if t.strip() and not _TOKEN_STRIP.fullmatch(t)]
+    return [sys.intern(t) for t in _CUT(text)
+            if t.strip() and not _TOKEN_STRIP.fullmatch(t)]
 
 
-def char_bigrams(text: str) -> list[str]:
-    s = re.sub(r"\s+", "", text)
-    return [s[i:i + 2] for i in range(len(s) - 1)]
+def char_bigrams(text: str, cap: int = 200) -> list[str]:
+    """只取前 cap 字符：头部已足够判别，全量 bigram 内存会到 GB 级。"""
+    s = re.sub(r"\s+", "", text)[:cap]
+    return [sys.intern(s[i:i + 2]) for i in range(len(s) - 1)]
 
 
 class Corpus:
@@ -43,20 +46,28 @@ class Corpus:
         self._ctoks: list[list[str]] = []
 
     # ── 构建 ──
-    def add(self, doc: Doc, chunks: list[Chunk]) -> None:
+    def add(self, doc: Doc, chunks: list[Chunk], rebuild: bool = True) -> None:
+        """rebuild=False 用于批量摄取，最后调 finalize() 一次建索引（O(N) 而非 O(N²)）。"""
         self.docs[doc.doc_id] = doc
         base = len(self.chunks)
         self.chunks.extend(chunks)
         for c in chunks:
             self._by_doc.setdefault(c.doc_id, []).append(base)
             base += 1
+        if rebuild:
+            self.finalize()
+
+    def finalize(self) -> None:
         self._rebuild()
 
     def _rebuild(self) -> None:
         texts = [f"{c.text} {' '.join(c.num_notes)} {self.docs[c.doc_id].company}"
                  f" {self.docs[c.doc_id].kind}" for c in self.chunks]
+        # 字级轨道把公司/类型放最前：截断（200字）不能把元数据截掉
+        char_texts = [f"{self.docs[c.doc_id].company} {self.docs[c.doc_id].kind} {c.text}"
+                      for c in self.chunks]
         self._wtoks = [word_tokens(t) for t in texts]
-        self._ctoks = [char_bigrams(t) for t in texts]
+        self._ctoks = [char_bigrams(t) for t in char_texts]
         self._bm25_word = BM25Okapi(self._wtoks) if self._wtoks else None
         self._bm25_char = BM25Okapi(self._ctoks) if self._ctoks else None
 

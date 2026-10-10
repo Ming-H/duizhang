@@ -187,9 +187,16 @@ def ingest_file(path: str | Path) -> tuple[Doc, list[Chunk]]:
 
 
 def expand_query(query: str) -> str:
-    """指标同义扩展：把口语指标名补上财报术语，检索更稳。纯规则零成本。"""
+    """查询扩展：① 指标同义（营收→营业收入）② 归因同义（原因→主要系）。
+
+    财报写因果用「主要系…影响」「主要由于…所致」，与口语问法零词面重叠，
+    不扩则归因表块根本进不了召回——这是词法检索在财报域的固有盲区，
+    显式补上比假装它不存在诚实。
+    """
     extra = []
     for slang, formal in METRIC_SYNONYMS.items():
         if slang in query.lower():
             extra.extend(formal[:2])
+    if any(w in query for w in ("原因", "为什么", "为何", "变动", "下滑", "增长")):
+        extra += ["主要系", "主要由于", "说明"]
     return f"{query} {' '.join(extra)}".strip() if extra else query
