@@ -79,7 +79,7 @@ def make_nodes(corpus: Corpus):
                     "route": "other", "route_reason": "期间不在库",
                     "trace": ["route:period-guard→refuse"]}
         if any(w in q for w in ("多少", "几个点", "占比", "增长率", "率", "每股",
-                                "营收", "收入", "利润", "净利", "毛利", "现金流",
+                                "营收", "收入", "利润", "净利", "毛利", "现金流", "订单", "在手", "手持",
                                 "亿元", "万元", "同比", "环比", "预告")):
             return {**state, "route": "metric", "route_reason": "命中指标词",
                     "trace": ["route:metric"]}
