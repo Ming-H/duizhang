@@ -108,17 +108,19 @@ def make_nodes(corpus: Corpus):
     def retrieve(state: GraphState) -> GraphState:
         q = state["effective_query"]
         eff = expand_query(q)
-        hits = corpus.search(eff, k=TOP_K, doc_filter=_doc_filter(q))
-        # 期间感知重排：问「半年度」时不该拿一季报的数字回答
         hints = _period_hints(state["query"])
+        filt = _doc_filter(q)
+        hits = corpus.search(eff, k=TOP_K, doc_filter=filt)
+        # 期间硬过滤：问「半年度」且该公司有半年度文档时，年报/季报全是噪声——
+        # 检索质量（海量年报块）会淹没 1.5× 加权，过滤比加权诚实。
         if hints:
-            def boosted(h):
-                doc = corpus.docs.get(h.chunk.doc_id)
-                match = doc and any(ht in doc.period for ht in hints)
-                return h.score * (1.5 if match else 1.0)
-            hits = sorted(hits, key=lambda h: (-boosted(h), h.rank))[:TOP_K]
-            hits = [Retrieved(chunk=h.chunk, score=round(boosted(h), 4), rank=i)
-                    for i, h in enumerate(hits, 1)]
+            exact = [h for h in hits
+                     if any(ht in corpus.docs[h.chunk.doc_id].period for ht in hints)]
+            if exact:
+                hits = exact[:TOP_K]
+        if not hits and hints and filt:
+            # 该公司该期间没有：放宽数字，但明确标注
+            hits = corpus.search(eff, k=TOP_K, doc_filter=filt)
         return {**state, "hits": hits, "trace": [f"retrieve:{len(hits)} hits"]}
 
     def grade_docs(state: GraphState) -> GraphState:
@@ -185,11 +187,14 @@ def make_nodes(corpus: Corpus):
         return {**state, "answer": body, "citations": cited,
                 "trace": ["generate:extractive"]}
 
+    MIN_SUMMARY_SCORE = 0.02   # 单路弱匹配 <0.02，双路真匹配 >0.03
+
     def summarize_doc(state: GraphState) -> GraphState:
         filt = _doc_filter(state["query"])
         target = None
-        for h in corpus.search(state["query"], k=6, doc_filter=filt):
-            target = h.chunk.doc_id
+        for h in corpus.search(expand_query(state["query"]), k=6, doc_filter=filt):
+            if h.score >= MIN_SUMMARY_SCORE:
+                target = h.chunk.doc_id
             break
         if target is None:
             return refuse(state)
