@@ -233,10 +233,11 @@ def expand_query(query: str) -> str:
     不扩则归因表块根本进不了召回——这是词法检索在财报域的固有盲区，
     显式补上比假装它不存在诚实。
     """
-    extra = []
+    extra: list[str] = []
     for slang, formal in METRIC_SYNONYMS.items():
         if slang in query.lower():
             extra.extend(formal[:2])
     if any(w in query for w in ("原因", "为什么", "为何", "变动", "下滑", "增长")):
         extra += ["主要系", "主要由于", "说明"]
+    extra = list(dict.fromkeys(extra))          # 同义词表多键命中会重复
     return f"{query} {' '.join(extra)}".strip() if extra else query

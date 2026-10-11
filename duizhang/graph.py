@@ -110,17 +110,17 @@ def make_nodes(corpus: Corpus):
         eff = expand_query(q)
         hints = _period_hints(state["query"])
         filt = _doc_filter(q)
-        hits = corpus.search(eff, k=TOP_K, doc_filter=filt)
+        raw = corpus.search(eff, k=TOP_K, doc_filter=filt)
+        hits = raw
         # 期间硬过滤：问「半年度」且该公司有半年度文档时，年报/季报全是噪声——
         # 检索质量（海量年报块）会淹没 1.5× 加权，过滤比加权诚实。
         if hints:
-            exact = [h for h in hits
+            exact = [h for h in raw
                      if any(ht in corpus.docs[h.chunk.doc_id].period for ht in hints)]
             if exact:
                 hits = exact[:TOP_K]
-        if not hits and hints and filt:
-            # 该公司该期间没有：放宽数字，但明确标注
-            hits = corpus.search(eff, k=TOP_K, doc_filter=filt)
+        # 该公司该期间没有对应报告 → 回退用未过滤结果（此前这里重复调用
+        # 同参数 search，得到同样被丢弃前的空集——真回退需要保留 raw）
         return {**state, "hits": hits, "trace": [f"retrieve:{len(hits)} hits"]}
 
     def grade_docs(state: GraphState) -> GraphState:

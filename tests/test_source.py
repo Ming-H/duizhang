@@ -37,8 +37,7 @@ def test_diff_three_way():
 
 def _ingest_once(repo_root, work, corpus_dir):
     import os, subprocess, sys
-    env = {**os.environ,
-           "DZ_DB": str(work / "test.db"), "DZ_IDX": str(work / "test.idx")}
+    env = {**os.environ, "DZ_DB": str(work / "test.db")}
     r = subprocess.run(
         [sys.executable, "-m", "duizhang.cli", "ingest", str(corpus_dir)],
         cwd=repo_root, capture_output=True, text=True, env=env)

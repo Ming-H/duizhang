@@ -61,8 +61,14 @@ class Store:
     # ── 写（事务） ──
 
     def add_doc(self, doc: Doc, chunks: list[Chunk]) -> None:
-        """四表同事务写入；fts rowid 对齐 chunks.rowid（lastrowid）。"""
+        """四表同事务写入；fts rowid 对齐 chunks.rowid（lastrowid）。
+
+        幂等契约：同 doc_id 重复写入 = 完全替换（先清后写）。不能靠
+        INSERT OR REPLACE——chunks 的 REPLACE 会换新 rowid，旧 rowid 的
+        fts 行不被覆盖，留下幽灵命中。
+        """
         con = self.con
+        self.drop_doc(doc.doc_id)
         with con:
             con.execute("INSERT OR REPLACE INTO docs VALUES (?,?,?,?,?,?)",
                         (doc.doc_id, doc.company, doc.period, doc.kind,

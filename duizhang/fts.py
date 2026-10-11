@@ -13,18 +13,15 @@ from duizhang.schemas import Chunk, Retrieved
 _CHUNK_COLS = ("ch.chunk_id, ch.doc_id, ch.page, ch.seq, ch.text, "
                "ch.is_table, ch.num_notes")
 
-# 性能 PRAGMA：页缓存 200MB + mmap（OS 按需换页，冷查询的主要来源）
+# 性能 PRAGMA：页缓存 200MB + mmap（OS 按需换页，冷查询的主要来源）。
+# 注意 sqlite 的 PRAGMA 按连接生效——必须每次连接都设，不能做全局一次性。
 _PRAGMAS = ("PRAGMA cache_size=-200000", "PRAGMA mmap_size=1073741824",
             "PRAGMA temp_store=MEMORY")
-_pragmas_done = False
 
 
 def _apply_pragmas(con):
-    global _pragmas_done
-    if not _pragmas_done:
-        for p in _PRAGMAS:
-            con.execute(p)
-        _pragmas_done = True
+    for p in _PRAGMAS:
+        con.execute(p)
 
 
 def _row_to_chunk(row) -> Chunk:
