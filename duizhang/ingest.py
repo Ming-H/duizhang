@@ -203,7 +203,8 @@ def ingest_file(path: str | Path) -> tuple[Doc, list[Chunk]]:
     doc_id = f"{company}_{period}"
     src = str(path)
     if str(path).lower().endswith(".pdf"):
-        pages = strip_boilerplate(read_pdf(path), len(read_pdf(path)))
+        pages = read_pdf(path)          # 只读一次（v0.4 前读了两遍）
+        pages = strip_boilerplate(pages, len(pages))
     else:
         pages = read_md(path)   # md 与 txt 同走纯文本通道
 

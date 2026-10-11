@@ -1,7 +1,6 @@
 import pytest
 
 from duizhang.ingest import chunk_page, normalize_numbers, parse_filename, expand_query
-from duizhang.index import Corpus
 from duizhang.graph import build_graph
 from duizhang.schemas import new_state
 
@@ -9,12 +8,18 @@ SAMPLES = __import__("pathlib").Path(__file__).resolve().parents[1] / "samples"
 
 
 @pytest.fixture(scope="module")
-def corpus():
+def corpus(tmp_path_factory):
+    """走生产路径建库：Store 写入 → Corpus 加载（与 CLI 完全一致）。"""
+    from pathlib import Path
     from duizhang.ingest import ingest_file
-    corp = Corpus()
+    from duizhang.index import Corpus
+    from duizhang.store import Store
+    db = tmp_path_factory.mktemp("dz") / "test.db"
+    store = Store(db)
     for f in sorted(SAMPLES.glob("*.pdf")) + sorted(SAMPLES.glob("*.md")):
-        corp.add(*ingest_file(f))
-    return corp
+        store.add_doc(*ingest_file(f))
+    store.close()
+    return Corpus.load(db)
 
 
 @pytest.fixture(scope="module")

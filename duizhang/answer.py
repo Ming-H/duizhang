@@ -39,7 +39,7 @@ def extractive_answer(state: GraphState, hits: list[Retrieved],
     wants_reason = any(w in state["query"] for w in ("原因", "为什么", "为何", "变动"))
     _REASON_PAT = re.compile(r"主要系|主要因|主要由于|所致|影响")
     scored = []
-    for h in hits[:6]:   # 扫前6：归因句常在 4 名开外，靠加分顶上来
+    for h in hits[:8]:   # 与 TOP_K 对齐：表格大块常占前排，答案块在 6 名开外
         for s in _sentences(h.chunk.text):
             stoks = _content_tokens(set(word_tokens(s)) | set(word_tokens(h.chunk.text[:40])))
             overlap = len(q & stoks)

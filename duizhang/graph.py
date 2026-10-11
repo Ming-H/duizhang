@@ -31,11 +31,13 @@
 
 from __future__ import annotations
 
+import re
+
 from langgraph.graph import StateGraph, START, END
 
 from duizhang import answer as ans
 from duizhang import llm as llmx
-from duizhang.index import Corpus
+from duizhang.index import Corpus, word_tokens
 from duizhang.ingest import expand_query
 from duizhang.schemas import GraphState, Retrieved
 
@@ -48,7 +50,6 @@ GRADE_THRESHOLD = 1.5   # 命中块与 query 的平均 token 重叠下限
 
 
 def make_nodes(corpus: Corpus):
-    from duizhang.index import word_tokens
 
     def route(state: GraphState) -> GraphState:
         q = state["query"]
@@ -68,8 +69,7 @@ def make_nodes(corpus: Corpus):
             return {**state, "route": "summary", "route_reason": "命中摘要词",
                     "trace": ["route:summary"]}
         # 期间守卫：query 里的年份若库中全无对应报告，先对账再回答——拒。
-        import re as _re
-        q_years = {y for y in _re.findall(r"(20\d{2})", q)}
+        q_years = {y for y in re.findall(r"(20\d{2})", q)}
         have_years = {d.period[:4] for d in corpus.docs.values() if d.period[:4].isdigit()}
         if q_years and not (q_years & have_years):
             periods = "、".join(sorted({d.period for d in corpus.docs.values()}))
@@ -187,23 +187,24 @@ def make_nodes(corpus: Corpus):
         return {**state, "answer": body, "citations": cited,
                 "trace": ["generate:extractive"]}
 
-    MIN_SUMMARY_SCORE = 0.028  # 单路弱匹配 <0.026（60万块上垃圾词也能凑出），双路真匹配 >0.03
+    # 摘要守卫（双条件或）：RRF 分 ≥0.028 = 词字双轨一致命中；或强域词重叠
+    # ≥3。仅分数阈值在 FTS5 分数分布下单轨真匹配会被误杀（实测 0.0164），
+    # 仅重叠则垃圾词偶合可过——两者互补。
 
     def summarize_doc(state: GraphState) -> GraphState:
         filt = _doc_filter(state["query"])
         target = None
-        from duizhang.index import word_tokens as _wt
-        q_toks = set(_wt(state["query"])) - {"怎么样", "怎么看", "如何", "观点", "总结", "摘要"}
+        q_toks = set(word_tokens(state["query"])) - {"怎么样", "怎么看", "如何", "观点", "总结", "摘要"}
         # 域词守卫：遍历前6命中，找到「分数达标 且 ≥2 词元重叠」的第一个；
-        # 第一名可能是无关键词的偶然块（字级 bigram 撞出来的分数）。
+        # 第一名可能是无关键词的偶然块（字级 trigram 撞出来的分数）。
         for h in corpus.search(expand_query(state["query"]), k=6, doc_filter=filt):
-            overlap = len(q_toks & set(_wt(h.chunk.text[:300])))
-            if h.score >= MIN_SUMMARY_SCORE and overlap >= 2:
+            overlap = len(q_toks & set(word_tokens(h.chunk.text[:300])))
+            if (h.score >= 0.028 and overlap >= 2) or overlap >= 3:
                 target = h.chunk.doc_id
                 break
         if target is None:
             return refuse(state)
-        doc_chunks = [c for c in corpus.chunks if c.doc_id == target][:12]
+        doc_chunks = corpus.chunks_of(target, limit=12)
         head = corpus.docs[target]
         key_lines = []
         for c in doc_chunks:

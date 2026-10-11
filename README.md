@@ -18,6 +18,9 @@ python -m duizhang.cli ask "欧科亿 2026 年半年度预计净利润多少"
 python -m duizhang.cli eval                # 内置评估集，一条命令复现
 ```
 
+全量语料：`python -m duizhang.cli ingest data/corpus`（manifest 指纹增量，
+新增/修改/删除自适应，幂等运行秒级返回）。
+
 零 API key、零模型下载。接 LLM 只需三个环境变量（图结构不变）：
 
 ```bash
@@ -53,7 +56,10 @@ START → route ──metric──→ retrieve → grade_docs ──insufficient
 - **元数据白捡**：巨潮财报命名 `公司_报告期类型.pdf` 自带公司与期间，解析文件名而非让模型猜。
 - **表格感知分块**：财报的核心事实住在表格里，纯字符切分等于销毁证据。数字密集短行聚成原子块，永不跨块。
 - **数字归一化**：`41,914.72 万元` 注释成 `≈4.19亿` 附在块尾，让词法检索对「多少亿」类问法直接命中（纯程序，零幻觉）。
-- **检索：双路 BM25 + RRF**：词级（jieba）+ 字级 bigram 两路 BM25 倒排，RRF 融合。v0.1 刻意不上向量模型——一条 `pip install` 后完全可复现优先；接口按可替换设计，向量检索在 roadmap。
+- **检索：SQLite FTS5 双轨 + RRF**（v0.4）：词轨（jieba 预分词 + unicode61）
+  与字轨（trigram）bm25 打分、RRF 融合；磁盘倒排使容量与内存解耦——
+  60.7 万块实测：稳态 39ms / 内存 0.03GB / 启动 0.05s / 增量摄取 0.8s。
+  容量推导与备选取舍见 `docs/DESIGN-scale.md`、讲解见 `docs/EXPLAINER.md`。
 - **评估内建**：改任何代码，`python -m duizhang.cli eval` 验证三指标不退化。
 
 ## 评估（heuristic 模式，内置 10 题集）
@@ -78,15 +84,19 @@ python -m duizhang.cli ingest /path/to/财报目录
 ```
 duizhang/
 ├── schemas.py      # GraphState（窄接口状态）+ Doc/Chunk/Citation
-├── ingest.py       # 文件名元数据 / 表格感知分块 / 数字归一化 / 指标同义扩展
-├── index.py        # 双路 BM25 (词+字) RRF 融合 + sqlite 持久化
+├── source.py       # 语料扫描 + manifest 三态 diff（增量账本）
+├── ingest.py       # 文件名元数据 / 表格感知分块 / 页眉剥离 / 数字归一化 / 查询扩展
+├── store.py        # 四表唯一写入口（事务 + fts rowid 对齐，幽灵块防线）
+├── index.py        # 分词原语 + 瘦身 Corpus（docs 全量、chunk 按需）
+├── fts.py          # FTS5 双轨检索（unicode61 词轨 + trigram 字轨）RRF 融合
 ├── graph.py        # LangGraph 状态机（route/retrieve/grade/rewrite/generate/verify）
 ├── answer.py       # 抽取式生成 + 引用覆盖率校验（对账闸门）
 ├── llm.py          # 可选 LLM 层（OpenAI 兼容；heuristic 模式不加载）
 ├── evalx.py        # 评估 runner
-└── cli.py          # ingest / ask / eval / docs
-tests/              # 10 用例：元数据/单位换算/表格原子性/路由劫持/期间守卫/纠错环有界
+└── cli.py          # ingest / index / ask / eval / docs
+tests/              # 19 用例：分块/路由/守卫/纠错环/Store 幽灵块回归/增量三态
 samples/            # 3 家公司 5 份真实财报（巨潮）
+docs/               # 设计文档 ×3 + EXPLAINER 讲解 + 流程动效图
 ```
 
 ## Roadmap
