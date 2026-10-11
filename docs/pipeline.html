@@ -134,7 +134,7 @@ const CONFIG = {
        {text:'· 文件名元数据：财报 / 券商研报双通道',size:12,color:'#94a3b8',dy:106},
        {text:'· 表格感知分块 + 页眉剥离（跨页高频行）',size:12,color:'#94a3b8',dy:130},
        {text:'· 数字归一化：41,914.72万元 → ≈4.19亿',size:12,color:'#94a3b8',dy:154},
-       {text:'· sqlite 落库 → 双路倒排索引（pickle 缓存）',size:12,color:'#94a3b8',dy:178},
+       {text:'· sqlite 落库 → FTS5 双轨倒排（磁盘，免重建）',size:12,color:'#94a3b8',dy:178},
        {text:'· 新财报入目录 → 一条命令自适应同步',size:12,color:'#94a3b8',dy:202},
      ]},
   ],
@@ -145,7 +145,7 @@ const CONFIG = {
   metrics: [
     {id:'m1', x:1830, y:720, color:'cyan', size:15, prefix:'', to:60.7, suffix:'万', dur:1.6, decimals:1,
      note:{text:'chunks 入库（1103 文档）', dy:26}},
-    {id:'m2', x:1830, y:775, color:'cyan', size:15, prefix:'', to:9, suffix:'ms', dur:1.2, decimals:0,
+    {id:'m2', x:1830, y:775, color:'cyan', size:15, prefix:'', to:39, suffix:'ms', dur:1.2, decimals:0,
      note:{text:'检索延迟 @ 60 万块', dy:26}},
   ],
   bursts: [
