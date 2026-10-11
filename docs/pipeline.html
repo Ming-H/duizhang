@@ -84,7 +84,7 @@ const CONFIG = {
   nodes: [
     {id:'q',    x:170,  y:620, w:110, h:110, color:'cyan',   shape:'circle', title:'问题', sub:'query'},
     {id:'rt',   x:447,  y:620, w:190, h:76,  color:'rose',   title:'route', sub:'三分类 + 期间守卫', sub2:'metric | summary | other'},
-    {id:'rv',   x:723,  y:620, w:190, h:76,  color:'cyan',   title:'retrieve', sub:'双路 BM25 + RRF', sub2:'公司过滤 · 同义扩展 · 期间硬过滤'},
+    {id:'rv',   x:723,  y:620, w:190, h:76,  color:'cyan',   title:'retrieve', sub:'FTS5 双轨 + RRF', sub2:'公司过滤 · 同义扩展 · 期间硬过滤'},
     {id:'gd',   x:1000, y:620, w:190, h:76,  color:'violet', title:'grade_docs', sub:'检索质量评分', sub2:'sufficient ?'},
     {id:'gn',   x:1277, y:620, w:190, h:76,  color:'amber',  title:'generate', sub:'heuristic / LLM 双模式', sub2:'强制 [公司_报告期 第N页]'},
     {id:'vf',   x:1553, y:620, w:190, h:76,  color:'violet', title:'verify', sub:'引用覆盖率对账', sub2:'<0.45 → 降级抽取式'},
