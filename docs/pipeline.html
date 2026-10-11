@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipeline Animation</title>
+<style>
+  :root{
+    --bg:#020617; --grid:#1e293b;
+    --cyan:#22d3ee; --violet:#a78bfa; --amber:#fbbf24;
+    --rose:#fb7185; --orange:#fb923c; --slate:#94a3b8;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%}
+  body{background:#050a18;font-family:'JetBrains Mono',ui-monospace,'SF Mono',Menlo,monospace;color:#e2e8f0;display:flex;flex-direction:column;align-items:center;overflow:hidden}
+
+  #wrap{position:relative;width:100%;max-width:1920px;flex:1;display:flex;align-items:center;justify-content:center}
+  svg#stage{width:100%;height:100%;display:block}
+
+  /* ---------- 入场 ---------- */
+  .node,.chip,.note{opacity:0;transform:scale(.72);transform-box:fill-box;transform-origin:center;
+    transition:opacity .7s ease,transform .7s cubic-bezier(.2,.9,.3,1.35)}
+  .node.on,.chip.on,.note.on{opacity:1;transform:scale(1)}
+  .edge{transition:stroke-dashoffset 1.1s ease .05s}
+  .node.on .box{animation:pulse 3.2s ease-in-out infinite}
+  @keyframes pulse{0%,100%{filter:drop-shadow(0 0 3px currentColor)}50%{filter:drop-shadow(0 0 10px currentColor)}}
+
+  .loop-anim{transform-box:fill-box;transform-origin:center;animation:spin 14s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  .popbase{opacity:0;transform-box:fill-box;transform-origin:center}
+  .popbase.pop{animation:popin .6s cubic-bezier(.2,1.4,.4,1) forwards}
+  @keyframes popin{0%{opacity:0;transform:scale(.4)}100%{opacity:1;transform:scale(1)}}
+
+  .burst-base{opacity:0;transform-box:fill-box;transform-origin:center}
+  .burst-base.go{animation:burst 1.3s ease-out forwards}
+  @keyframes burst{0%{opacity:.9;transform:scale(.4)}100%{opacity:0;transform:scale(2.6)}}
+
+  .particle{filter:drop-shadow(0 0 4px currentColor)}
+
+  /* ---------- ?t= 调试模式：跳过过渡直达终态（headless 截图用） ---------- */
+  svg.instant .node,svg.instant .chip,svg.instant .note,svg.instant .edge{transition:none!important}
+  svg.instant .popbase.pop{animation:none!important;opacity:1}
+  svg.instant .node.on .box{animation:none!important;filter:drop-shadow(0 0 6px currentColor)}
+
+  /* ---------- 字幕条 ---------- */
+  #caption{width:100%;max-width:1920px;padding:12px 28px;background:#0b1226;border-top:1px solid #1e293b;
+    font-size:15px;color:#cbd5e1;display:flex;align-items:center;gap:16px;min-height:56px}
+  #cap-idx{color:#64748b;font-size:12px;white-space:nowrap}
+  #cap-text{transition:opacity .4s}
+
+  /* ---------- 控制 ---------- */
+  #ctrl{position:fixed;top:14px;left:16px;display:flex;gap:8px;z-index:9}
+  #ctrl button{background:#0b1226;color:#94a3b8;border:1px solid #334155;border-radius:6px;
+    width:38px;height:32px;font-size:15px;cursor:pointer;font-family:inherit}
+  #ctrl button:hover{color:#e2e8f0;border-color:#64748b}
+</style>
+</head>
+<body>
+<div id="wrap">
+<svg id="stage" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid meet">
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <radialGradient id="vig" cx="50%" cy="46%" r="75%">
+      <stop offset="55%" stop-color="#020617" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.55"/>
+    </radialGradient>
+  </defs>
+</svg>
+</div>
+
+<div id="caption"><span id="cap-idx">01/01</span><span id="cap-text"></span></div>
+<div id="ctrl"><button id="btn-pp" title="暂停/继续">⏸</button><button id="btn-rp" title="重播">↻</button></div>
+
+<script>
+(function(){
+/* ==================== CONFIG START（唯一允许修改的区域） ==================== */
+const CONFIG = {
+  title: '对账 duizhang · 带证据链纠错环的财报 RAG',
+  subtitle: 'LangGraph 编排 —— 检索可复现 · 生成必带页码引用 · 对不上账就拒答',
+  legend: [{color:'cyan',text:'数据/产出'},{color:'violet',text:'校验'},{color:'amber',text:'迭代/生成'},{color:'rose',text:'决策/拒答'}],
+  nodes: [
+    {id:'q',    x:170,  y:620, w:110, h:110, color:'cyan',   shape:'circle', title:'问题', sub:'query'},
+    {id:'rt',   x:447,  y:620, w:190, h:76,  color:'rose',   title:'route', sub:'三分类 + 期间守卫', sub2:'metric | summary | other'},
+    {id:'rv',   x:723,  y:620, w:190, h:76,  color:'cyan',   title:'retrieve', sub:'双路 BM25 + RRF', sub2:'公司过滤 · 同义扩展 · 期间硬过滤'},
+    {id:'gd',   x:1000, y:620, w:190, h:76,  color:'violet', title:'grade_docs', sub:'检索质量评分', sub2:'sufficient ?'},
+    {id:'gn',   x:1277, y:620, w:190, h:76,  color:'amber',  title:'generate', sub:'heuristic / LLM 双模式', sub2:'强制 [公司_报告期 第N页]'},
+    {id:'vf',   x:1553, y:620, w:190, h:76,  color:'violet', title:'verify', sub:'引用覆盖率对账', sub2:'<0.45 → 降级抽取式'},
+    {id:'an',   x:1830, y:620, w:110, h:110, color:'cyan',   shape:'circle', title:'答案', sub:'逐句引用'},
+    {id:'sm',   x:610,  y:210, w:190, h:64,  color:'amber',  title:'summarize_doc', sub:'summary 支线 · 文档要点直出'},
+    {id:'rw',   x:1150, y:210, w:190, h:64,  color:'amber',  title:'rewrite_query', sub:'纠错环 · 改写后重检索'},
+    {id:'rf',   x:1560, y:210, w:170, h:64,  color:'rose',   title:'refuse', sub:'无据不答 · 期间守卫'},
+  ],
+  edges: [
+    {id:'e1', d:'M 225,620 L 344,620', color:'rose'},
+    {id:'e2', d:'M 542,620 L 618,620', color:'cyan'},
+    {id:'e3', d:'M 818,620 L 895,620', color:'violet'},
+    {id:'e4', d:'M 1095,620 L 1172,620', color:'amber'},
+    {id:'e5', d:'M 1372,620 L 1449,620', color:'violet'},
+    {id:'e6', d:'M 1648,620 L 1723,620', color:'cyan'},
+    {id:'es1', d:'M 470,582 C 470,370 480,270 505,232', color:'amber'},
+    {id:'es2', d:'M 705,242 C 950,330 1650,430 1802,568', color:'amber'},
+    {id:'er1', d:'M 1000,582 C 1000,380 1030,285 1055,242', color:'amber'},
+    {id:'er2', d:'M 1120,244 C 900,330 760,440 723,578', color:'rose', dashed:true},
+    {id:'ef1', d:'M 1553,582 C 1553,390 1558,300 1560,244', color:'rose'},
+    {id:'er0', d:'M 490,578 C 520,105 1400,100 1545,196', color:'slate', dashed:true, arrow:false},
+  ],
+  flows: [
+    {id:'f1', edge:'e2', color:'cyan',   n:4, speed:.22},
+    {id:'f2', edge:'er2', color:'rose',  n:3, speed:.3},
+    {id:'f3', edge:'es1', color:'amber', n:2, speed:.18},
+    {id:'f4', edge:'e6', color:'cyan',   n:4, speed:.22},
+  ],
+  orbits: [
+    {id:'o1', cx:723, cy:620, rx:150, ry:88, color:'cyan', n:3, speed:.9},
+    {id:'o2', cx:723, cy:620, rx:110, ry:62, color:'cyan', n:2, speed:1.2, reverse:true},
+  ],
+  chips: [
+    {id:'c1', x:120,  y:790, w:230, color:'rose',   text:'期间守卫 · 问 2030 直接拒'},
+    {id:'c2', x:370,  y:790, w:250, color:'cyan',   text:'表格感知分块 · 原子块不跨块'},
+    {id:'c3', x:640,  y:790, w:230, color:'cyan',   text:'数字归一化 · 万元 → ≈亿'},
+    {id:'c4', x:890,  y:790, w:250, color:'cyan',   text:'同义扩展 · 营收 → 营业收入'},
+    {id:'c5', x:1160, y:790, w:230, color:'amber',  text:'纠错环 · 改写重检索 ≤1 次'},
+    {id:'c6', x:1410, y:790, w:250, color:'violet', text:'对账校验 · 覆盖率 <0.45 降级'},
+  ],
+  notes: [
+    {id:'nt1', x:90, y:130, w:408, h:318, color:'amber', dashed:true,
+     lines:[
+       {text:'离线构建流水线（manifest 指纹增量）',size:13.5,color:'#fcd34d',dy:30},
+       {text:'· 扫描 pdf/md/txt（排除 0 分析结果）',size:12,color:'#94a3b8',dy:58},
+       {text:'· fingerprint diff → 增 / 改 / 删 · 幂等',size:12,color:'#94a3b8',dy:82},
+       {text:'· 文件名元数据：财报 / 券商研报双通道',size:12,color:'#94a3b8',dy:106},
+       {text:'· 表格感知分块 + 页眉剥离（跨页高频行）',size:12,color:'#94a3b8',dy:130},
+       {text:'· 数字归一化：41,914.72万元 → ≈4.19亿',size:12,color:'#94a3b8',dy:154},
+       {text:'· sqlite 落库 → 双路倒排索引（pickle 缓存）',size:12,color:'#94a3b8',dy:178},
+       {text:'· 新财报入目录 → 一条命令自适应同步',size:12,color:'#94a3b8',dy:202},
+     ]},
+  ],
+  pops: [
+    {id:'p1', x:1150, y:300, text:'≤ 1 次（有界）', color:'rose', size:13},
+    {id:'p2', x:1553, y:500, text:'fail → 降级抽取式', color:'violet', size:12.5},
+  ],
+  metrics: [
+    {id:'m1', x:1830, y:720, color:'cyan', size:15, prefix:'', to:60.7, suffix:'万', dur:1.6, decimals:1,
+     note:{text:'chunks 入库（1103 文档）', dy:26}},
+    {id:'m2', x:1830, y:775, color:'cyan', size:15, prefix:'', to:9, suffix:'ms', dur:1.2, decimals:0,
+     note:{text:'检索延迟 @ 60 万块', dy:26}},
+  ],
+  bursts: [
+    {id:'bu1', x:1830, y:620, r:70, color:'cyan'},
+  ],
+  scenes: [
+    {t:0,    cap:'对账 duizhang —— 带证据链纠错环的财报 RAG'},
+    {t:0.8,  cap:'离线：财报库 → 表格感知分块 → 双路倒排索引（manifest 指纹增量，自适应新文件）', on:['nt1','c2','c3']},
+    {t:4.2,  cap:'问题进入 LangGraph：route 三分类 + 期间守卫（问 2030 年直接拒答）', on:['q','rt','e1','c1']},
+    {t:7.8,  cap:'retrieve：公司过滤 · 指标同义扩展 · 期间硬过滤 → 词+字双路 BM25 RRF 融合', on:['rv','e2','o1','o2','f1','c4']},
+    {t:11.4, cap:'grade_docs 评分：证据不足 → rewrite_query 有界纠错环（≤1 次，条件边实现）', on:['gd','e3','rw','er1','er2','f2','p1','c5']},
+    {t:15.0, cap:'summary 支线：summarize_doc 定位目标文档，要点直出', on:['sm','es1','es2','f3']},
+    {t:18.4, cap:'generate 双模式：heuristic 抽取式零 key / LLM grounded 强制页码引用', on:['gn','e4']},
+    {t:21.8, cap:'verify 对账校验：覆盖率 <0.45 自动降级抽取式；无据 → refuse', on:['vf','e5','rf','ef1','er0','p2','c6']},
+    {t:25.2, cap:'答案逐句挂 [公司_报告期 第N页] —— 每个答案都能对账', on:['an','e6','f4','m1','m2','bu1']},
+    {t:28.5, cap:'—— 流水线持续运行中（↻ 重播）——'},
+  ],
+};
+/* ==================== CONFIG END ==================== */
+
+
+/* ==================== 引擎（勿改） ==================== */
+const $=s=>document.querySelector(s);
+const svg=$('#stage');
+const PAL={cyan:'#22d3ee',violet:'#a78bfa',amber:'#fbbf24',rose:'#fb7185',orange:'#fb923c',slate:'#94a3b8',dim:'#64748b'};
+const FILL={cyan:'rgba(8,51,68,.4)',violet:'rgba(76,29,149,.35)',amber:'rgba(120,53,15,.25)',
+            rose:'rgba(136,19,55,.25)',orange:'rgba(251,146,60,.2)',slate:'rgba(30,41,59,.5)'};
+const col=c=>PAL[c]||c, fill=c=>FILL[c]||'rgba(30,41,59,.4)';
+const defs=svg.querySelector('defs');
+function el(t,attrs,parent){const e=document.createElementNS('http://www.w3.org/2000/svg',t);
+  for(const k in attrs)e.setAttribute(k,attrs[k]);(parent||svg).appendChild(e);return e;}
+
+/* ---------- 背景 ---------- */
+el('rect',{width:1920,height:1080,fill:'#020617'});
+el('rect',{width:1920,height:1080,fill:'url(#grid)'});
+el('rect',{width:1920,height:1080,fill:'url(#vig)'});
+
+/* ---------- 标题 / 图例 ---------- */
+if(CONFIG.title){
+  const t=el('text',{x:960,y:58,fill:'#f1f5f9','font-size':30,'font-weight':700,'text-anchor':'middle','letter-spacing':2});
+  t.textContent=CONFIG.title;
+}
+if(CONFIG.subtitle){
+  const s=el('text',{x:960,y:92,fill:'#64748b','font-size':15,'text-anchor':'middle'});
+  s.textContent=CONFIG.subtitle;
+}
+let lx=1400;
+(CONFIG.legend||[]).forEach(l=>{
+  el('circle',{cx:lx,cy:48,r:5,fill:col(l.color)});
+  const t=el('text',{x:lx+12,y:52,fill:'#64748b','font-size':12});t.textContent=l.text;
+  lx+=24+[...l.text].reduce((a,ch)=>a+(/[^\x00-\xff]/.test(ch)?13:8),0)+28;
+});
+
+/* ---------- 箭头 marker（按颜色动态生成） ---------- */
+function markerFor(color){
+  const id='arr-'+color.replace('#','');
+  if(!document.getElementById(id)){
+    const m=el('marker',{id,markerWidth:10,markerHeight:7,refX:9,refY:3.5,orient:'auto'},defs);
+    el('polygon',{points:'0 0, 10 3.5, 0 7',fill:color},m);
+  }
+  return 'url(#'+id+')';
+}
+
+/* ---------- 注册表：id → {type,...}，scene.on 统一分发 ---------- */
+const REG={};
+const METRICS=[];
+
+/* ---------- nodes ---------- */
+(CONFIG.nodes||[]).forEach(n=>{
+  const c=col(n.color);
+  const g=el('g',{id:n.id,'class':'node',color:c});
+  if(n.shape==='circle'){
+    el('circle',{'class':'box',cx:n.x,cy:n.y,r:n.w/2,fill:'rgba(8,51,68,.5)',stroke:c,'stroke-width':2},g);
+    const t1=el('text',{x:n.x,y:n.y-6,fill:'#fff','font-size':17,'font-weight':700,'text-anchor':'middle'},g);
+    t1.textContent=n.title;
+    if(n.sub){const t2=el('text',{x:n.x,y:n.y+18,fill:'#fff','font-size':17,'font-weight':700,'text-anchor':'middle'},g);t2.textContent=n.sub;}
+  }else{
+    el('rect',{'class':'box',x:n.x-n.w/2,y:n.y-n.h/2,width:n.w,height:n.h,rx:10,fill:fill(n.color),stroke:c,'stroke-width':1.5},g);
+    const t1=el('text',{x:n.x,y:n.y-24,fill:'#fff','font-size':16,'font-weight':600,'text-anchor':'middle'},g);
+    t1.textContent=n.title;
+    if(n.sub){const t2=el('text',{x:n.x,y:n.y+2,fill:'#94a3b8','font-size':12,'text-anchor':'middle'},g);t2.textContent=n.sub;}
+    if(n.sub2){const t3=el('text',{x:n.x,y:n.y+24,fill:'#64748b','font-size':11,'text-anchor':'middle'},g);t3.textContent=n.sub2;}
+  }
+  REG[n.id]={type:'node',el:g};
+});
+
+/* ---------- edges ---------- */
+(CONFIG.edges||[]).forEach(e=>{
+  const c=col(e.color||'slate');
+  const p=el('path',{id:e.id,'class':'edge',d:e.d,fill:'none',stroke:c,
+    'stroke-width':e.width||2,'marker-end':e.arrow===false?'none':markerFor(c)});
+  if(e.dashed)p.setAttribute('stroke-dasharray','7,6');
+  REG[e.id]={type:'edge',el:p,dashed:!!e.dashed};
+});
+/* 画线动画预置：实线用 dashoffset 生长，虚线用透明度渐显 */
+Object.values(REG).filter(r=>r.type==='edge').forEach(r=>{
+  const e=r.el, len=e.getTotalLength();
+  if(r.dashed){e.style.transition='opacity 1s ease';e.style.opacity=0;r.mode='fade';}
+  else{e.dataset.len=len;e.style.strokeDasharray=len;e.style.strokeDashoffset=len;r.mode='draw';}
+});
+
+/* ---------- flows（粒子沿 edge 轨迹） ---------- */
+const pLayer=el('g',{id:'particles'});
+(CONFIG.flows||[]).forEach(f=>{
+  const src=REG[f.edge]; if(!src||src.type!=='edge')return;
+  const tr=el('path',{d:src.el.getAttribute('d'),visibility:'hidden'});
+  const len=tr.getTotalLength(), dots=[];
+  for(let i=0;i<(f.n||4);i++){
+    const d=el('circle',{r:f.r||3,fill:col(f.color||'orange'),'class':'particle',color:col(f.color||'orange')},pLayer);
+    d.style.display='none'; dots.push({el:d,off:i/(f.n||4)});
+  }
+  REG[f.id]={type:'flow',path:tr,len,dots,speed:f.speed||.2};
+});
+
+/* ---------- orbits（轨道环 + 轨道粒子） ---------- */
+(CONFIG.orbits||[]).forEach(o=>{
+  let ring=null;
+  if(o.ring!==false){
+    ring=el('ellipse',{id:'ring-'+o.id,'class':'loop-anim',cx:o.cx,cy:o.cy,rx:o.rx,ry:o.ry,
+      fill:'none',stroke:col(o.color||'amber'),'stroke-width':1.5,'stroke-dasharray':'10,8',opacity:0});
+    if(o.reverse)ring.style.animationDirection='reverse';
+  }
+  const dots=[];
+  for(let i=0;i<(o.n||3);i++){
+    const d=el('circle',{r:o.r||3,fill:col(o.color||'amber'),'class':'particle',color:col(o.color||'amber')},pLayer);
+    d.style.display='none'; dots.push({el:d,phase:i/(o.n||3)*Math.PI*2});
+  }
+  REG[o.id]={type:'orbit',ring,cx:o.cx,cy:o.cy,rx:o.rx,ry:o.ry,dots,speed:o.speed||1.0};
+});
+
+/* ---------- chips ---------- */
+(CONFIG.chips||[]).forEach(c=>{
+  const g=el('g',{id:c.id,'class':'chip',color:col(c.color)});
+  el('rect',{x:c.x-c.w/2,y:c.y-15,width:c.w,height:30,rx:8,fill:fill(c.color),stroke:col(c.color),'stroke-width':1},g);
+  const t=el('text',{x:c.x,y:c.y+5,fill:'#e2e8f0','font-size':12,'text-anchor':'middle'},g);
+  t.textContent=c.text;
+  REG[c.id]={type:'chip',el:g};
+});
+
+/* ---------- notes（说明框） ---------- */
+(CONFIG.notes||[]).forEach(n=>{
+  const g=el('g',{id:n.id,'class':'note',color:col(n.color)});
+  const rect=el('rect',{x:n.x,y:n.y,width:n.w,height:n.h,rx:8,fill:fill(n.color).replace(/[\d.]+\)$/,'0.12)'),
+    stroke:col(n.color),'stroke-width':1},g);
+  if(n.dashed)rect.setAttribute('stroke-dasharray','4,4');
+  (n.lines||[]).forEach(l=>{
+    const t=el('text',{x:n.x+n.w/2,y:n.y+(l.dy||28),fill:col(l.color||'slate'),'font-size':l.size||12,'text-anchor':'middle'},g);
+    t.textContent=l.text;
+  });
+  REG[n.id]={type:'note',el:g};
+});
+
+/* ---------- pops（弹出标注） ---------- */
+(CONFIG.pops||[]).forEach(p=>{
+  const t=el('text',{id:p.id,'class':'popbase',x:p.x,y:p.y,fill:col(p.color||'amber'),
+    'font-size':p.size||15,'font-weight':600,'text-anchor':p.anchor||'middle'});
+  t.textContent=p.text;
+  REG[p.id]={type:'pop',el:t};
+});
+
+/* ---------- metrics（数字滚动） ---------- */
+(CONFIG.metrics||[]).forEach(m=>{
+  const t=el('text',{id:m.id,x:m.x,y:m.y,fill:col(m.color||'cyan'),'font-size':m.size||15,
+    'font-weight':600,'text-anchor':'middle',opacity:0});
+  t.textContent=(m.prefix||'')+(0).toFixed(m.decimals===undefined?1:m.decimals)+(m.suffix||'');
+  if(m.note){
+    const nt=el('text',{id:m.id+'-note',x:m.x,y:m.y+(m.note.dy||30),fill:col(m.note.color||'dim'),
+      'font-size':m.note.size||11,'text-anchor':'middle',opacity:0});
+    nt.textContent=m.note.text;
+  }
+  const r={type:'metric',el:t,cfg:m,start:null}; REG[m.id]=r; METRICS.push(r);
+});
+
+/* ---------- bursts（冲击波） ---------- */
+(CONFIG.bursts||[]).forEach(b=>{
+  const c=el('circle',{id:b.id,'class':'burst-base',cx:b.x,cy:b.y,r:b.r||72,fill:'none',
+    stroke:col(b.color||'cyan'),'stroke-width':2});
+  REG[b.id]={type:'burst',el:c};
+});
+
+/* ---------- 动作分发 ---------- */
+const activeFlows=new Set(), activeOrbits=new Set();
+function act(id,t){
+  const r=REG[id]; if(!r)return;
+  switch(r.type){
+    case 'node': case 'chip': case 'note': r.el.classList.add('on'); break;
+    case 'edge': if(r.mode==='draw')r.el.style.strokeDashoffset=0; else r.el.style.opacity=1; break;
+    case 'flow': r.dots.forEach(d=>d.el.style.display=''); activeFlows.add(r); break;
+    case 'orbit': if(r.ring)r.ring.style.opacity=.8; r.dots.forEach(d=>d.el.style.display=''); activeOrbits.add(r); break;
+    case 'pop': r.el.classList.add('pop'); break;
+    case 'metric': r.el.style.opacity=1; r.start=r.start===null?(t!==undefined?t:vt):r.start;
+      const nt=document.getElementById(id+'-note'); if(nt)nt.style.opacity=1; break;
+    case 'burst': r.el.classList.add('go'); break;
+  }
+}
+
+/* ---------- 字幕 ---------- */
+const capText=$('#cap-text'), capIdx=$('#cap-idx');
+const SCENES=CONFIG.scenes||[];
+function setCap(s,i){
+  capText.style.opacity=0;
+  setTimeout(()=>{capText.textContent=s;
+    capIdx.textContent=String(i+1).padStart(2,'0')+'/'+String(SCENES.length).padStart(2,'0');
+    capText.style.opacity=1;},180);
+}
+
+/* ---------- 分镜执行 ---------- */
+let vt=0,last=null,idx=0,playing=true;
+function runScenes(){
+  while(idx<SCENES.length&&vt>=SCENES[idx].t){
+    const sc=SCENES[idx];
+    if(sc.cap!==undefined)setCap(sc.cap,idx);
+    let ci=0;
+    (sc.on||[]).forEach(id=>{
+      const r=REG[id];
+      if(r&&r.type==='chip'){const d=ci*180;setTimeout(()=>act(id,sc.t),d);ci++;}
+      else act(id,sc.t);
+    });
+    idx++;
+  }
+}
+
+/* ---------- 数字滚动 ---------- */
+function updateMetrics(){
+  METRICS.forEach(r=>{
+    if(r.start===null)return;
+    const p=Math.min(1,Math.max(0,(vt-r.start)/(r.cfg.dur||1.8)));
+    const e=1-Math.pow(1-p,3), v=r.cfg.to*e, d=r.cfg.decimals===undefined?1:r.cfg.decimals;
+    r.el.textContent=(r.cfg.prefix||'')+v.toFixed(d)+(r.cfg.suffix||'');
+  });
+}
+
+/* ---------- 粒子推进 ---------- */
+function updateParticles(){
+  activeFlows.forEach(r=>{
+    r.dots.forEach(d=>{
+      const t=((vt*r.speed+d.off)%1+1)%1;
+      const p=r.path.getPointAtLength(t*r.len);
+      d.el.setAttribute('cx',p.x); d.el.setAttribute('cy',p.y);
+    });
+  });
+  activeOrbits.forEach(r=>{
+    r.dots.forEach(d=>{
+      const a=vt*r.speed+d.phase;
+      d.el.setAttribute('cx',r.cx+r.rx*Math.cos(a));
+      d.el.setAttribute('cy',r.cy+r.ry*Math.sin(a));
+    });
+  });
+}
+
+/* ---------- 主循环 ---------- */
+function tick(now){
+  if(last===null)last=now;
+  const dt=Math.min(.05,(now-last)/1000); last=now;
+  if(playing){vt+=dt;runScenes();}
+  updateMetrics(); updateParticles();
+  requestAnimationFrame(tick);
+}
+
+/* 调试钩子：?t=秒 → 直接跳到该时刻（headless 截图验证用） */
+const dbgT=parseFloat(new URLSearchParams(location.search).get('t'));
+if(!isNaN(dbgT)){svg.classList.add('instant');vt=dbgT;runScenes();updateMetrics();updateParticles();}
+requestAnimationFrame(tick);
+
+/* ---------- 控制 ---------- */
+$('#btn-pp').onclick=()=>{playing=!playing;$('#btn-pp').textContent=playing?'⏸':'▶';};
+$('#btn-rp').onclick=()=>{
+  document.querySelectorAll('.node,.chip,.note').forEach(e=>e.classList.remove('on'));
+  document.querySelectorAll('.popbase').forEach(e=>e.classList.remove('pop'));
+  document.querySelectorAll('.burst-base').forEach(e=>e.classList.remove('go'));
+  Object.values(REG).forEach(r=>{
+    if(r.type==='edge'){if(r.mode==='draw')r.el.style.strokeDashoffset=r.el.dataset.len;else r.el.style.opacity=0;}
+    if(r.type==='flow'){r.dots.forEach(d=>d.el.style.display='none');activeFlows.delete(r);}
+    if(r.type==='orbit'){if(r.ring)r.ring.style.opacity=0;r.dots.forEach(d=>d.el.style.display='none');activeOrbits.delete(r);}
+  });
+  METRICS.forEach(r=>{r.start=null;r.el.style.opacity=0;
+    r.el.textContent=(r.cfg.prefix||'')+(0).toFixed(r.cfg.decimals===undefined?1:r.cfg.decimals)+(r.cfg.suffix||'');
+    const nt=document.getElementById(r.cfg.id+'-note'); if(nt)nt.style.opacity=0;});
+  vt=0;idx=0;if(SCENES[0]&&SCENES[0].cap!==undefined)setCap(SCENES[0].cap,0);
+};
+})();
+</script>
+</body>
+</html>
