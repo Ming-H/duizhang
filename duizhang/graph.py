@@ -39,7 +39,7 @@ from duizhang import answer as ans
 from duizhang import llm as llmx
 from duizhang.index import Corpus, word_tokens
 from duizhang.ingest import expand_query
-from duizhang.schemas import GraphState, Retrieved
+from duizhang.schemas import GraphState
 
 MAX_RETRIES = 1
 TOP_K = 8

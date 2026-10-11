@@ -73,7 +73,6 @@ class GraphState(TypedDict, total=False):
     route: Route
     route_reason: str
     # retrieve 节点
-    doc_filter: str                    # 可选：限定公司（从 query 提取）
     hits: list[Retrieved]
     # grade 节点
     relevance: float                   # 命中块与 query 的相关度分

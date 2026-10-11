@@ -12,7 +12,6 @@ import json
 from pathlib import Path
 
 from duizhang.graph import ask
-from duizhang.schemas import new_state
 
 DATASET = Path(__file__).resolve().parents[1] / "evals" / "dataset.json"
 
