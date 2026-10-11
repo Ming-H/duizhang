@@ -104,14 +104,6 @@ class Store:
                 "INSERT OR REPLACE INTO manifest VALUES (?,?,?,?)",
                 (path, doc_id, fingerprint, ingested_at))
 
-    def drop_manifest_by_doc(self, doc_id: str) -> None:
-        with self.con:
-            self.con.execute("DELETE FROM manifest WHERE doc_id=?", (doc_id,))
-
-    def drop_manifest_by_path(self, path: str) -> None:
-        with self.con:
-            self.con.execute("DELETE FROM manifest WHERE path=?", (path,))
-
     def manifest_doc_of(self, path: str) -> str | None:
         row = self.con.execute(
             "SELECT doc_id FROM manifest WHERE path=?", (path,)).fetchone()
