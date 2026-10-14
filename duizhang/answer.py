@@ -10,9 +10,8 @@ from __future__ import annotations
 
 import re
 
-from duizhang.schemas import GraphState, Retrieved
-
 from duizhang.index import word_tokens
+from duizhang.schemas import GraphState, Retrieved
 
 _SENT_SPLIT = re.compile(r"(?<=[。；！？])\s*")
 
@@ -26,9 +25,25 @@ _META_WORDS = {"公司", "股份", "报告", "年度", "半年度", "季度", "�
                "情况", "说明", "有限公司", "证券", "代码", "简称", "公告", "编号"}
 
 
-def _content_tokens(toks) -> set:
-    return {t for t in toks
-            if t not in _META_WORDS and not re.fullmatch(r"20\d{2}", t)}
+def _content_tokens(toks, extra_meta: tuple[str, ...] = (),
+                    meta_chars: frozenset[str] = frozenset()) -> set:
+    """元词不计分。extra_meta（如公司名整串）按子串匹配；meta_chars
+    （公司名的字符集）按「token 全部字符都在其中」匹配——jieba 会把
+    公司名切碎（海伦哲→海伦+哲），整串匹配拦不住碎片。页眉句
+    「公司名+报告标题」靠 query 里的公司名/期间得分，事实句反而落选
+    （全量库实测）。元词做子串匹配：第一季度⊃季度、年度报告⊃报告。"""
+    out = set()
+    for t in toks:
+        if t in _META_WORDS or re.fullmatch(r"20\d{2}", t):
+            continue
+        if any(m and m in t for m in extra_meta):
+            continue
+        if any(m in t for m in _META_WORDS):
+            continue
+        if meta_chars and set(t) <= meta_chars:
+            continue
+        out.add(t)
+    return out
 
 
 def extractive_answer(state: GraphState, hits: list[Retrieved],
@@ -40,8 +55,10 @@ def extractive_answer(state: GraphState, hits: list[Retrieved],
     _REASON_PAT = re.compile(r"主要系|主要因|主要由于|所致|影响")
     scored = []
     for h in hits[:8]:   # 与 TOP_K 对齐：表格大块常占前排，答案块在 6 名开外
+        company = h.chunk.doc_id.split("_", 1)[0]   # doc_id = 公司_报告期
         for s in _sentences(h.chunk.text):
-            stoks = _content_tokens(set(word_tokens(s)) | set(word_tokens(h.chunk.text[:40])))
+            stoks = _content_tokens(set(word_tokens(s)) | set(word_tokens(h.chunk.text[:40])),
+                                    extra_meta=(company,), meta_chars=frozenset(company))
             overlap = len(q & stoks)
             # 数字句优先（财报问答大多数时候在问数字）
             has_num = bool(re.search(r"\d", s)) or bool(h.chunk.num_notes)
@@ -50,21 +67,29 @@ def extractive_answer(state: GraphState, hits: list[Retrieved],
                 score += 1.5
             scored.append((score, s, h.chunk))
     scored.sort(key=lambda x: -x[0])
-    picked, cited = [], []
+    picked, cited, picked_chunks = [], [], []
     for score, s, chunk in scored:
         if score <= 0:
             continue
         picked.append(f"{s} {chunk.citation}")
         if chunk.citation not in cited:
             cited.append(chunk.citation)
+        picked_chunks.append(chunk)
         if len(picked) >= max_sents:
             break
     if not picked:
         return "", []
-    notes = "；".join(hits[0].chunk.num_notes[:2]) if hits[0].chunk.num_notes else ""
+    # 数字注释跟随被选中的块（关键数字句常在第 2 名开外，固定取 top1
+    # 会让「≈4.19亿」类换算缺席——它正是「多少亿」问法的命中通道）
+    notes: list[str] = []
+    for chunk in picked_chunks:
+        for n in chunk.num_notes:
+            if n not in notes:
+                notes.append(n)
+    note_str = "；".join(notes[:2])
     body = "\n".join(f"· {p}" for p in picked)
-    if notes:
-        body = f"{body}\n（数字参考：{notes}）"
+    if note_str:
+        body = f"{body}\n（数字参考：{note_str}）"
     return body, cited
 
 
@@ -72,12 +97,19 @@ def extractive_answer(state: GraphState, hits: list[Retrieved],
 
 
 def citation_coverage(answer: str, hits: list[Retrieved]) -> float:
-    """答案中被引用块实际支撑的比例：句 token 与被引块的重叠率均值。"""
+    """答案句与证据池的 token 重叠率均值。
+
+    证据池 = 答案中实际引用的块（citation 串出现在答案里）；答案没有
+    可识别引用时回退 hits[:4]（LLM 生成路径只看过前 4 块）。
+    抽取式从 hits[:8] 抽句（答案块常在第 4 名开外），第 5–8 名块支撑
+    的句子若不计入证据池，自家答案会被自家 verify 误判 degraded。
+    """
     sents = [s for s in _SENT_SPLIT.split(re.sub(r"\[[^\]]*\]", "", answer))
              if len(s.strip()) >= 6]
     if not sents:
         return 0.0
-    evidence = " ".join(h.chunk.text for h in hits[:4])
+    cited = [h for h in hits if h.chunk.citation in answer]
+    evidence = " ".join(h.chunk.text for h in (cited or hits[:4]))
     etoks = set(word_tokens(evidence))
     cov = []
     for s in sents:
@@ -88,8 +120,13 @@ def citation_coverage(answer: str, hits: list[Retrieved]) -> float:
     return sum(cov) / len(cov) if cov else 0.0
 
 
-def has_citation(answer: str) -> bool:
-    return bool(re.search(r"\[[^\]]+第\d+页\]|\[[^\]]+_\d{4}[A-Z0-9]*\]", answer))
+def has_citation(answer: str, hits: list[Retrieved] | None = None) -> bool:
+    """答案是否带引用：正则覆盖 PDF 块与 LLM 手写格式；hits 兜底
+    MD/TXT 块——page=0 的引用是 [doc_id]（无「第N页」、无 `_\d{4}`
+    期间后缀），正则永远漏判。"""
+    if re.search(r"\[[^\]]+第\d+页\]|\[[^\]]+_\d{4}[A-Z0-9]*\]", answer):
+        return True
+    return bool(hits) and any(h.chunk.citation in answer for h in hits)
 
 
 COVERAGE_THRESHOLD = 0.45   # 抽取式天然高；LLM 生成低于此值说明在编
@@ -100,6 +137,6 @@ def verify(answer: str, hits: list[Retrieved]) -> tuple[str, float]:
     if not answer.strip():
         return "refused", 0.0
     cov = citation_coverage(answer, hits)
-    if cov >= COVERAGE_THRESHOLD and has_citation(answer):
+    if cov >= COVERAGE_THRESHOLD and has_citation(answer, hits):
         return "pass", round(cov, 3)
     return "degraded", round(cov, 3)

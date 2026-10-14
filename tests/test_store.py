@@ -1,11 +1,8 @@
 """Store 写入层与 FTS 对齐的回归测试（幽灵块事故的永久防线）。"""
 
-import sys
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from duizhang.index import Corpus
 from duizhang.ingest import ingest_file
@@ -42,7 +39,6 @@ def test_search_hits_ingested_content(db):
 def test_drop_removes_fts_rows(db):
     """幽灵块回归：drop 后 fts 与 chunks 必须同删，搜旧内容零命中。"""
     _add(db)
-    before = db.counts()[1]
     db.drop_doc("欧科亿_2026H1E")
     assert db.counts() == (0, 0)
     corp = Corpus.load(db.db_path)
@@ -68,3 +64,21 @@ def test_rebuild_fts_idempotent(db):
     assert n == n2
     corp = Corpus.load(db.db_path)
     assert corp.search("净利润", k=3, doc_filter="欧科亿")
+
+
+def test_schema_has_doc_id_index(db):
+    """chunks(doc_id) 是 drop_doc/chunks_of 的过滤键：无索引时全表扫
+    60.7 万行（实测 31.8ms），索引后 <0.1ms；建索引 0.16s / ~15MB。
+    存量库由 SCHEMA 的 IF NOT EXISTS 在下次 Store 打开时自动补建。"""
+    names = {r[0] for r in db.con.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='chunks'")}
+    assert "idx_chunks_doc" in names
+
+
+def test_analyze_populates_stats(db):
+    """analyze 后查询计划器有统计（sqlite_stat1），全量摄取后应调用。"""
+    _add(db)
+    db.analyze()
+    n = db.con.execute(
+        "SELECT COUNT(*) FROM sqlite_stat1 WHERE tbl='chunks'").fetchone()[0]
+    assert n >= 1

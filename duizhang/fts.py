@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-import re
-
 from duizhang.schemas import Chunk, Retrieved
 
 _CHUNK_COLS = ("ch.chunk_id, ch.doc_id, ch.page, ch.seq, ch.text, "
@@ -56,16 +54,19 @@ def char_expr(query: str) -> str:
     return " OR ".join(_quote(s) for s in dict.fromkeys(segs))
 
 
-def search(con, docs: dict, query: str, k: int = 8,
-           doc_filter: str = "") -> list[Retrieved]:
+def search(con, docs: dict, query: str, k: int = 8, doc_filter: str = "",
+           doc_scope: set[str] | None = None) -> list[Retrieved]:
     """双路 FTS5 → RRF 融合 → Retrieved 列表。
 
-    docs: doc_id → Doc（公司过滤在 Python 侧展开为 doc_id 集合后 SQL 下推）。
+    docs: doc_id → Doc。doc_filter（公司名）在 Python 侧展开为 doc_id
+    集合后 SQL 下推；doc_scope 直接给定允许的 doc_id 集合（期间硬过滤
+    用——文档级限定，见 graph.retrieve）。
     """
     allow_ids: list[str] | None = None
-    if doc_filter:
+    if doc_filter or doc_scope is not None:
         allow_ids = [d for d in docs
-                     if doc_filter in d or doc_filter in docs[d].company]
+                     if (not doc_filter or doc_filter in d or doc_filter in docs[d].company)
+                     and (doc_scope is None or d in doc_scope)]
         if not allow_ids:
             return []
 

@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import re
 
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import END, START, StateGraph
 
 from duizhang import answer as ans
 from duizhang import llm as llmx
@@ -49,10 +49,30 @@ GRADE_THRESHOLD = 1.5   # 命中块与 query 的平均 token 重叠下限
 # ── 节点实现 ────────────────────────────────────────────
 
 
+def period_hints(query: str) -> list[str]:
+    """query → 期间提示（period 字段后缀：H1/Q1/Q3/FY）。
+
+    互斥匹配，从最具体的期间开始判定：「半年度」包含「年度」，
+    顺序 if 会让 FY 混进半年度问题的 hints，期间硬过滤随之失效
+    （2026-10-14 全量库实测：问 2026 半年度，命中 2025FY:5 / 2026H1E:2）。
+    季度口语映射按财报日历：二季度→H1（半年报）、四季度→FY（年报）。
+    """
+    if any(w in query for w in ("半年度", "半年报", "中报", "二季度", "上半年")):
+        return ["H1"]
+    if "一季" in query or "Q1" in query:
+        return ["Q1"]
+    if "三季" in query or "Q3" in query:
+        return ["Q3"]
+    if "年度" in query or "年报" in query or "四季度" in query or "全年" in query:
+        return ["FY"]
+    return []
+
+
 def make_nodes(corpus: Corpus):
 
     def route(state: GraphState) -> GraphState:
         q = state["query"]
+        fallback: list[str] = []      # LLM 故障降级留痕（trace 是 append 语义）
         if state["mode"] == "llm" and llmx.llm_enabled():
             try:
                 r = llmx.chat_json(
@@ -63,11 +83,11 @@ def make_nodes(corpus: Corpus):
                 return {**state, "route": r.get("route", "metric"),
                         "route_reason": r.get("reason", "")[:80], "trace": ["route:llm"]}
             except Exception:
-                pass  # LLM 失败静默降级到规则
+                fallback = ["route:llm→fallback"]   # 静默降级到规则，但可见
         # 摘要意图优先判定：否则「总结业绩预告」会被「预告」劫持到 metric
         if any(w in q for w in ("总结", "摘要", "概览", "要点", "怎么样", "如何看", "怎么看", "观点")):
             return {**state, "route": "summary", "route_reason": "命中摘要词",
-                    "trace": ["route:summary"]}
+                    "trace": fallback + ["route:summary"]}
         # 期间守卫：query 里的年份若库中全无对应报告，先对账再回答——拒。
         q_years = {y for y in re.findall(r"(20\d{2})", q)}
         have_years = {d.period[:4] for d in corpus.docs.values() if d.period[:4].isdigit()}
@@ -77,14 +97,14 @@ def make_nodes(corpus: Corpus):
                     f"（现有期间：{periods}）。对不上账，不硬答。",
                     "citations": [], "verdict": "refused",
                     "route": "other", "route_reason": "期间不在库",
-                    "trace": ["route:period-guard→refuse"]}
+                    "trace": fallback + ["route:period-guard→refuse"]}
         if any(w in q for w in ("多少", "几个点", "占比", "增长率", "率", "每股",
                                 "营收", "收入", "利润", "净利", "毛利", "现金流", "订单", "在手", "手持",
                                 "亿元", "万元", "同比", "环比", "预告")):
             return {**state, "route": "metric", "route_reason": "命中指标词",
-                    "trace": ["route:metric"]}
+                    "trace": fallback + ["route:metric"]}
         return {**state, "route": "other", "route_reason": "未命中意图词",
-                "trace": ["route:other"]}
+                "trace": fallback + ["route:other"]}
 
     def _doc_filter(query: str) -> str:
         for doc_id in corpus.docs:
@@ -93,34 +113,26 @@ def make_nodes(corpus: Corpus):
                 return company
         return ""
 
-    def _period_hints(query: str) -> list[str]:
-        hints = []
-        if "半年度" in query or "半年报" in query or "中报" in query:
-            hints += ["H1"]
-        if "第一季" in query or "一季报" in query or "Q1" in query:
-            hints += ["Q1"]
-        if "第三季" in query or "三季报" in query:
-            hints += ["Q3"]
-        if "年度" in query or "年报" in query:
-            hints += ["FY"]
-        return hints
-
     def retrieve(state: GraphState) -> GraphState:
         q = state["effective_query"]
         eff = expand_query(q)
-        hints = _period_hints(state["query"])
+        hints = period_hints(state["query"])
         filt = _doc_filter(q)
         raw = corpus.search(eff, k=TOP_K, doc_filter=filt)
         hits = raw
-        # 期间硬过滤：问「半年度」且该公司有半年度文档时，年报/季报全是噪声——
-        # 检索质量（海量年报块）会淹没 1.5× 加权，过滤比加权诚实。
+        # 期间硬过滤（文档级）：问「半年度/一季报」而该公司有对应期间文档时，
+        # 其它期间全是噪声——海量年报块会淹没目标期间（命中级后过滤会把
+        # 目标块挤出 top-8，exact 落空回退到未过滤结果 = 拿年报答一季报，
+        # 全量库实测），所以限定 doc 集合重查一次。
         if hints:
-            exact = [h for h in raw
-                     if any(ht in corpus.docs[h.chunk.doc_id].period for ht in hints)]
-            if exact:
-                hits = exact[:TOP_K]
-        # 该公司该期间没有对应报告 → 回退用未过滤结果（此前这里重复调用
-        # 同参数 search，得到同样被丢弃前的空集——真回退需要保留 raw）
+            allowed = {d for d, doc in corpus.docs.items()
+                       if (not filt or filt in d or filt in doc.company)
+                       and any(ht in doc.period for ht in hints)}
+            if allowed:
+                scoped = corpus.search(eff, k=TOP_K, doc_filter=filt, doc_scope=allowed)
+                if scoped:
+                    hits = scoped
+        # 该公司该期间没有对应文档（allowed 为空或 scoped 空）→ 用未过滤结果
         return {**state, "hits": hits, "trace": [f"retrieve:{len(hits)} hits"]}
 
     def grade_docs(state: GraphState) -> GraphState:
@@ -134,6 +146,7 @@ def make_nodes(corpus: Corpus):
             rel.append(len(q & ht))
         score = max(rel) if rel else 0.0
         sufficient = score >= GRADE_THRESHOLD
+        fallback: list[str] = []
         if state["mode"] == "llm" and llmx.llm_enabled():
             try:
                 r = llmx.chat_json(
@@ -143,12 +156,13 @@ def make_nodes(corpus: Corpus):
                     + "\n---\n".join(h.chunk.text[:200] for h in state["hits"][:3]))
                 sufficient = bool(r.get("sufficient", sufficient))
             except Exception:
-                pass
+                fallback = ["grade:llm→fallback"]
         return {**state, "relevance": round(score, 2), "sufficient": sufficient,
-                "trace": [f"grade:{score:.1f} {'ok' if sufficient else 'insufficient'}"]}
+                "trace": fallback + [f"grade:{score:.1f} {'ok' if sufficient else 'insufficient'}"]}
 
     def rewrite_query(state: GraphState) -> GraphState:
         base = state["query"]
+        fallback: list[str] = []
         if state["mode"] == "llm" and llmx.llm_enabled():
             try:
                 r = llmx.chat_json(
@@ -156,15 +170,17 @@ def make_nodes(corpus: Corpus):
                     '{"query":"改写后的 query"}', base)
                 base = r.get("query", base) or base
             except Exception:
+                fallback = ["rewrite:llm→fallback"]
                 base = expand_query(base) + " 预计 营业收入 净利润"
         else:
             base = f"{expand_query(base)} 预计 营业收入 净利润 同比"
         return {**state, "effective_query": base, "rewritten": True,
                 "retries": state.get("retries", 0) + 1,
-                "trace": ["rewrite"]}
+                "trace": fallback + ["rewrite"]}
 
     def generate(state: GraphState) -> GraphState:
         hits = state["hits"]
+        fallback: list[str] = []
         if state["mode"] == "llm" and llmx.llm_enabled():
             evidence = "\n\n".join(
                 f"[{h.chunk.doc_id} 第{h.chunk.page}页] {h.chunk.text[:400]}"
@@ -181,11 +197,11 @@ def make_nodes(corpus: Corpus):
                             "trace": ["generate:llm"]}
                 return {**state, "answer": "", "verdict": "refused",
                         "trace": ["generate:llm-no-evidence"]}
-            except Exception:  # LLM 故障 → 走抽取式，绝不空手而归
-                pass
+            except Exception:  # LLM 故障 → 走抽取式，绝不空手而归（留痕）
+                fallback = ["generate:llm→fallback"]
         body, cited = ans.extractive_answer(state, hits)
         return {**state, "answer": body, "citations": cited,
-                "trace": ["generate:extractive"]}
+                "trace": fallback + ["generate:extractive"]}
 
     # 摘要守卫（双条件或）：RRF 分 ≥0.028 = 词字双轨一致命中；或强域词重叠
     # ≥3。仅分数阈值在 FTS5 分数分布下单轨真匹配会被误杀（实测 0.0164），
@@ -216,7 +232,7 @@ def make_nodes(corpus: Corpus):
             if len(key_lines) >= 5:
                 break
         body = (f"{head.company}（{head.period} {head.kind}）要点：\n"
-                + "\n".join(f"· {l}" for l in key_lines))
+                + "\n".join(f"· {line}" for line in key_lines))
         return {**state, "answer": body, "citations": [target], "verdict": "pass",
                 "trace": [f"summarize:{target}"]}
 
@@ -231,7 +247,7 @@ def make_nodes(corpus: Corpus):
         if verdict == "pass":
             return {**state, "verdict": "pass", "trace": [f"verify:pass({cov})"]}
         if verdict == "refused":
-            return refuse({**state, "trace": [f"verify:empty→refuse"]})
+            return refuse({**state, "trace": ["verify:empty→refuse"]})
         # degraded：LLM 答案对不上账 → 降级为抽取式（永远有真凭实据）
         body, cited = ans.extractive_answer(state, state["hits"])
         if body:

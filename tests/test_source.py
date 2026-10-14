@@ -2,9 +2,7 @@
 
 import sqlite3
 
-import pytest
-
-from duizhang.source import DEFAULT_EXCLUDE, diff, scan
+from duizhang.source import diff, scan
 
 
 def _touch(path, content="x"):
@@ -36,7 +34,9 @@ def test_diff_three_way():
 
 
 def _ingest_once(repo_root, work, corpus_dir):
-    import os, subprocess, sys
+    import os
+    import subprocess
+    import sys
     env = {**os.environ, "DZ_DB": str(work / "test.db")}
     r = subprocess.run(
         [sys.executable, "-m", "duizhang.cli", "ingest", str(corpus_dir)],
@@ -74,3 +74,27 @@ def test_incremental_add_modify_delete(tmp_path):
     (seed / "notes.md").unlink()
     out4 = _ingest_once(repo, work, seed)
     assert "-1 删除" in out4
+
+
+def test_ingest_second_root_keeps_first_root_docs(tmp_path):
+    """多根摄取：ingest 目录 B 不能把目录 A 摄取的文档当孤儿清掉。
+    （2026-10-14 实测：ingest data/corpus 静默清光了 samples/ 的文档。）"""
+    import shutil
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[1]
+    work = tmp_path / "work"
+    work.mkdir()
+    root_a, root_b = work / "a", work / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    shutil.copy(repo / "samples" / "欧科亿_2026年半年度业绩预告.pdf", root_a)
+    shutil.copy(repo / "samples" / "海伦哲_2026年第一季度报告.pdf", root_b)
+
+    _ingest_once(repo, work, root_a)
+    _ingest_once(repo, work, root_b)      # 现状：这一步会把 A 的文档当孤儿删掉
+    _ingest_once(repo, work, root_a)      # 回到 A：幂等，B 的文档必须仍在
+
+    con = sqlite3.connect(work / "test.db")
+    docs = {r[0] for r in con.execute("SELECT doc_id FROM docs")}
+    con.close()
+    assert docs == {"欧科亿_2026H1E", "海伦哲_2026Q1"}

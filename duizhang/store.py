@@ -11,7 +11,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from duizhang.index import word_tokens, char_text
+from duizhang.index import char_text, word_tokens
 from duizhang.schemas import Chunk, Doc
 
 SCHEMA = """
@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS docs (
 CREATE TABLE IF NOT EXISTS chunks (
   chunk_id TEXT PRIMARY KEY, doc_id TEXT, page INT, seq INT,
   text TEXT, is_table INT, num_notes TEXT);
+CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);
 CREATE TABLE IF NOT EXISTS manifest (
   path TEXT PRIMARY KEY, doc_id TEXT, fingerprint TEXT, ingested_at TEXT);
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_w USING fts5(content_w, tokenize='unicode61');
@@ -32,6 +33,11 @@ class Store:
     def __init__(self, db_path: str | Path):
         self.db_path = str(db_path)
         self.con = sqlite3.connect(self.db_path)
+        # WAL 是库级持久属性；synchronous/cache 是连接级。
+        # 写连接开 NORMAL + 大页缓存：增量写入与 rebuild_fts 受益。
+        self.con.execute("PRAGMA journal_mode=WAL")
+        self.con.execute("PRAGMA synchronous=NORMAL")
+        self.con.execute("PRAGMA cache_size=-200000")
         self.con.executescript(SCHEMA)
         self.con.commit()
 
@@ -108,6 +114,12 @@ class Store:
         row = self.con.execute(
             "SELECT doc_id FROM manifest WHERE path=?", (path,)).fetchone()
         return row[0] if row else None
+
+    def analyze(self) -> None:
+        """刷新查询计划器统计（sqlite_stat1）。全量/大增量摄取后调用一次，
+        FTS JOIN 与 doc_id 过滤的计划选择受益。幂等，重复调用只是重算。"""
+        with self.con:
+            self.con.execute("ANALYZE")
 
     # ── 一次性迁移：为存量 chunks 补建 fts（幂等：先清空两表全量重建） ──
 

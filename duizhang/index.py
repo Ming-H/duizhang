@@ -52,11 +52,12 @@ class Corpus:
 
     # ── 检索（委托 fts 模块） ──
 
-    def search(self, query: str, k: int = 8,
-               doc_filter: str = "") -> list[Retrieved]:
+    def search(self, query: str, k: int = 8, doc_filter: str = "",
+               doc_scope: set[str] | None = None) -> list[Retrieved]:
         if not self._con or not self.docs:
             return []
-        return fts.search(self._con, self.docs, query, k=k, doc_filter=doc_filter)
+        return fts.search(self._con, self.docs, query, k=k, doc_filter=doc_filter,
+                          doc_scope=doc_scope)
 
     def chunks_of(self, doc_id: str, limit: int = 12) -> list[Chunk]:
         """summarize 用：按文档取前 N 块（替代 v0.3 的全内存扫描）。"""

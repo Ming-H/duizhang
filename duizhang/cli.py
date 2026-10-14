@@ -39,9 +39,19 @@ def cmd_ingest(args):
         if getattr(args, "rebuild", False):
             Path(DB).unlink(missing_ok=True)
         store = Store(DB)
+        root = Path(args.path)
         scanned = source.scan(args.path)
         manifest = store.manifest()
         sources = store.sources()
+
+        def under_root(p: str) -> bool:
+            """路径是否在本次扫描根之下。混合绝对/相对形式时保守判
+            False（不删）——多根摄取下，删除只对本根负责。"""
+            try:
+                Path(p).relative_to(root)
+                return True
+            except ValueError:
+                return False
 
         # 引导：旧库无 manifest 时按 docs.source 一次性建账
         if not manifest and sources:
@@ -50,12 +60,15 @@ def cmd_ingest(args):
                     store.set_manifest(src, doc_id, scanned[src], "bootstrap")
             manifest = store.manifest()
         to_add, to_update, to_delete = source.diff(manifest, scanned)
+        # manifest 里其它根（如 samples/）的路径不该被本次扫描判死
+        to_delete = [p for p in to_delete if under_root(p)]
 
-        # 删除（磁盘消失）+ 孤儿（source 不在扫描范围：目录被排除/移动）
+        # 删除（本根内磁盘消失）+ 孤儿（source 曾在本根下但已不在扫描范围：
+        # 目录被排除/移动）。其它根的文档不受影响。
         in_scope = set(scanned) | set(to_add)
         dropped = {store.manifest_doc_of(p) for p in to_delete} - {None}
         dropped |= {doc_id for doc_id, src in sources.items()
-                    if src not in in_scope}
+                    if src not in in_scope and under_root(src)}
         for doc_id in dropped:
             store.drop_doc(doc_id)
 
@@ -85,6 +98,7 @@ def cmd_ingest(args):
             print(f"= 无变化  {n_docs} docs / {n_chunks} chunks")
             store.close()
             return
+        store.analyze()   # 查询计划器统计：有写入才值得重算
         print(f"+{n_new} 新增  ~{n_upd} 更新  -{len(to_delete)} 删除  "
               f"→ {n_docs} docs / {n_chunks} chunks")
         store.close()
