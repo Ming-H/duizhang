@@ -6,11 +6,9 @@
 
 from __future__ import annotations
 
+import operator
 from dataclasses import dataclass, field
 from typing import Annotated, Literal, TypedDict
-
-import operator
-
 
 # ── 语料侧 ──────────────────────────────────────────────
 

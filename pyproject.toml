@@ -1,0 +1,13 @@
+# 工具配置（项目以 `python -m duizhang.cli` 从仓库根运行，不做库发布；
+# 运行依赖见 requirements.txt）
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# E4/E7/E9 = pycodestyle 硬错误，F = pyflakes，I = import 排序
+select = ["E4", "E7", "E9", "F", "I"]

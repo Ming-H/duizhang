@@ -7,3 +7,5 @@ duizhang.db
 
 data/
 *.idx.pkl
+duizhang.db-wal
+duizhang.db-shm

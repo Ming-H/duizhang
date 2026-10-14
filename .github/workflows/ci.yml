@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint（ruff）
+        run: ruff check .
+
+      - name: 单元测试（含 Store 幽灵块/多根摄取/对账闸门回归）
+        run: python -m pytest -q
+
+      - name: 冒烟：README 30 秒流程（samples 摄取 → 问答 → 评估）
+        run: |
+          python -m duizhang.cli ingest samples/
+          python -m duizhang.cli ask "欧科亿 2026 年半年度预计净利润多少"
+          python -m duizhang.cli eval

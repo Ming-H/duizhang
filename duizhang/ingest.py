@@ -184,7 +184,7 @@ def strip_boilerplate(pages: list[str], page_count: int) -> list[str]:
 
     freq = Counter()
     for pt in pages:
-        for ln in {l.strip() for l in pt.splitlines() if l.strip()}:
+        for ln in {raw.strip() for raw in pt.splitlines() if raw.strip()}:
             freq[_norm(ln)] += 1
     threshold = max(2, int(page_count * 0.3))
     # 归一化后比对：PDF 抽取的空格位置逐页漂移（2026年/2026 年），
@@ -193,8 +193,8 @@ def strip_boilerplate(pages: list[str], page_count: int) -> list[str]:
               if c >= threshold and 8 <= len(n) <= 60}
     if not boiler:
         return pages
-    return ["\n".join(l for l in pt.splitlines()
-                       if _norm(l.strip()) not in boiler)
+    return ["\n".join(raw for raw in pt.splitlines()
+                      if _norm(raw.strip()) not in boiler)
             for pt in pages]
 
 
