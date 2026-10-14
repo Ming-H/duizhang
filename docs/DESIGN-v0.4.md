@@ -117,3 +117,31 @@ duizhang/store.py（新）
 | trigram 索引膨胀（磁盘） | content_c 截 200 字；实测入库后检查 fts 磁盘增量，超预算则降级纯词法（中文 jieba 已覆盖主路径，DESIGN-scale §6） |
 | FTS5 bm25 排序与自研版有差异 | evalx 三指标做裁判（验收项 1），不做排序逐位对齐 |
 | sqlite 单写者并发 | 单进程 CLI 设计内无并发写；文档声明 |
+
+## 5. 第四轮审查修复（2026-10-14）
+
+全量代码通读 + 752MB 生产库实测发现五处逻辑缺陷与一处性能缺陷，全部按
+TDD（先失败测试后修复）处理；修复前后 eval 对比与回归测试见 tests/。
+
+| # | 缺陷 | 根因 | 修复 | 实测证据 |
+|---|---|---|---|---|
+| R-1 | 期间硬过滤被子串污染：「半年度」包含「年度」，FY 混进 hints，年报块淹没目标期间 | `period_hints` 顺序 if 无互斥 | 互斥匹配（从最具体期间开始）+ 补「一/二/三/四季度」口语映射（二季度→H1、四季度→FY） | 问 2026 半年度命中分布 2025FY:5/2026H1E:2 → 全部 H1E |
+| R-2 | 期间过滤是命中级后过滤：大文档把目标期间块挤出 top-8，exact 落空回退未过滤结果 = 拿年报答一季报 | top-8 窗口内做块级过滤 | 升级为文档级 `doc_scope`（fts.search 新参数），该公司有对应期间文档即限定集合重查 | 欧科亿 Q1 同比题 top1 2025FY → 2026Q1 |
+| R-3 | 自家抽取式答案被自家 verify 误判 degraded：extractive 从 hits[:8] 抽句、coverage 只认 hits[:4] | 证据池与抽取范围口径不一致 | 证据池 = 答案中实际引用的块（citation 串匹配），无引用回退 hits[:4]（LLM 路径不变） | trace `verify:degraded(0.37)→extractive` → `verify:pass(0.941)` |
+| R-4 | MD/TXT 块（page=0）引用 `[doc_id]` 永远过不了 `has_citation` 正则 | 正则要求「第N页」或 `_\d{4}` 后缀 | hits 兜底：citation 串直接比对 | `[永和股份_MD]` False → True |
+| R-5 | 页眉句（公司名+报告标题）靠 query 公司名得分，事实数字句落选；数字注释固定取 top1 块 | 元词表不含公司名；jieba 把公司名切碎（海伦哲→海伦+哲） | 元词过滤补公司名（整串子串 + 字符集覆盖碎片）；注释跟随被选中句所在块 | 海伦哲题答案 4 句页眉 → 数字句 |
+| R-6 | `chunks(doc_id)` 无索引：drop_doc/chunks_of 全表扫 60.7 万行 | SCHEMA 缺索引 | `CREATE INDEX IF NOT EXISTS idx_chunks_doc`（存量库下次 Store 打开自动补建）+ WAL + ANALYZE | 31.8ms → <0.1ms；建索引 0.16s/~15MB |
+
+工程化同步：多根摄取（ingest B 不再清掉 A 的文档，删除/孤儿判定限本根）、
+LLM 降级 trace 留痕（`route:llm→fallback` 等）、evalx 口径修正（retrieval@3
+docstring、逐题 ✓ 含 doc_hit、图编译一次）、裸 `pytest` 可跑（pyproject
+pythonpath，删除 sys.path hack）、ruff + GitHub Actions CI（lint + 测试 +
+README 30 秒流程冒烟）。
+
+补录实测：content_c 截 200 字影响 14.2%（86,104/607,502 块的去空白后长度
+超 200），词轨（全文）兜底——维持 §4 的截断决策，数字记录在案。
+
+**修复前后（heuristic，全量语料 1,104 docs / 607,502 chunks）**：
+retrieval@3 0.875 → **1.00**，answer hit 0.625 → **1.00**，refusal 1.00。
+评估集第 6 题期望词补 `644,051,473`（corpus 版财报无 113.49 字样，表格
+两年数可推出；samples 版两词皆可命中）。

@@ -1,5 +1,7 @@
 # 对账 duizhang 🧾
 
+[![CI](https://github.com/Ming-H/duizhang/actions/workflows/ci.yml/badge.svg)](https://github.com/Ming-H/duizhang/actions/workflows/ci.yml)
+
 > **RAG 的每个答案都要能对账。**
 
 带证据链纠错环的财报问答引擎：LangGraph 编排 Corrective-RAG，逐句挂引用、引用必可回溯到财报原文的页与段；对不上的答案宁可拒答，也不编。
@@ -19,7 +21,9 @@ python -m duizhang.cli eval                # 内置评估集，一条命令复�
 ```
 
 全量语料：`python -m duizhang.cli ingest data/corpus`（manifest 指纹增量，
-新增/修改/删除自适应，幂等运行秒级返回）。
+新增/修改/删除自适应，幂等运行秒级返回；**多根摄取互不干扰**——
+ingest `samples/` 后再 ingest `data/corpus`，两个根的文档共存，
+删除/孤儿清理只对本次扫描的根负责）。
 
 零 API key、零模型下载。接 LLM 只需三个环境变量（图结构不变）：
 
@@ -64,13 +68,22 @@ START → route ──metric──→ retrieve → grade_docs ──insufficient
 
 ## 评估（heuristic 模式，内置 10 题集）
 
-| 指标 | 结果 |
-|---|---|
-| retrieval@3 | 0.875 |
-| answer hit | 1.00 |
-| refusal（应拒答拒答率） | 1.00 |
+| 指标 | samples 库 | 全量语料（1,104 docs / 60.7 万块） |
+|---|---|---|
+| retrieval@3 | 1.00 | 1.00 |
+| answer hit | 1.00 | 1.00 |
+| refusal（应拒答拒答率） | 1.00 | 1.00 |
 
 含两类陷阱题：未来期间（2030）与领域外（天气）——都必须拒答。
+全量口径在第四轮审查前为 0.875 / 0.625 / 1.00——期间过滤与对账口径的
+五处修复记录见 `docs/DESIGN-v0.4.md` §5。
+
+单元测试（30 用例：分块/路由/守卫/纠错环/Store 幽灵块/多根摄取/对账口径回归）：
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
 
 ## 用自己的财报
 
@@ -94,7 +107,7 @@ duizhang/
 ├── llm.py          # 可选 LLM 层（OpenAI 兼容；heuristic 模式不加载）
 ├── evalx.py        # 评估 runner
 └── cli.py          # ingest / index / ask / eval / docs
-tests/              # 19 用例：分块/路由/守卫/纠错环/Store 幽灵块回归/增量三态
+tests/              # 30 用例：分块/路由/守卫/纠错环/Store 幽灵块/多根摄取/对账口径回归
 samples/            # 3 家公司 5 份真实财报（巨潮）
 docs/               # 设计文档 ×3 + EXPLAINER 讲解 + 流程动效图
 ```
