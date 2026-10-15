@@ -66,7 +66,9 @@ class GraphState(TypedDict, total=False):
 
     # 输入
     query: str
-    mode: str                          # heuristic | llm
+    mode: str                          # heuristic | llm（auto 在 new_state 解析）
+    # understand 节点（v0.5：LLM 查询理解，规则兜底）
+    understanding: dict                # {intent, companies, period, reason}
     # route 节点
     route: Route
     route_reason: str

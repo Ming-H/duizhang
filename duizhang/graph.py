@@ -45,6 +45,39 @@ MAX_RETRIES = 1
 TOP_K = 8
 GRADE_THRESHOLD = 1.5   # 命中块与 query 的平均 token 重叠下限
 
+# 意图关键词（route 与 rule_understand 共用；摘要词优先，防止
+# 「总结业绩预告」被「预告」劫持到 metric）
+_SUMMARY_WORDS = ("总结", "摘要", "概览", "要点", "怎么样", "如何看", "怎么看", "观点")
+_METRIC_WORDS = ("多少", "几个点", "占比", "增长率", "率", "每股",
+                 "营收", "收入", "利润", "净利", "毛利", "现金流", "订单", "在手", "手持",
+                 "亿元", "万元", "同比", "环比", "预告")
+_COMPARE_WORDS = ("对比", "比较", "vs", "VS", "哪家", "谁强", "差异")
+
+
+# ── 查询理解 ────────────────────────────────────────────
+
+
+def rule_understand(query: str, corpus) -> dict:
+    """规则查询理解（heuristic 主路径 / LLM 故障兜底）。
+
+    相比 v0.4 的 _doc_filter 只回首个公司，这里全量命中——多公司是
+    compare 分解的前提。period 复用 period_hints 的互斥匹配。
+    """
+    companies = list(dict.fromkeys(
+        d.company for d in corpus.docs.values()
+        if d.company and d.company in query))
+    hints = period_hints(query)
+    if len(companies) >= 2 and any(w in query for w in _COMPARE_WORDS):
+        intent = "compare"
+    elif any(w in query for w in _SUMMARY_WORDS):
+        intent = "summary"
+    elif any(w in query for w in _METRIC_WORDS):
+        intent = "metric"
+    else:
+        intent = "other"
+    return {"intent": intent, "companies": companies,
+            "period": hints[0] if hints else "", "reason": "rule"}
+
 
 # ── 节点实现 ────────────────────────────────────────────
 
@@ -69,6 +102,51 @@ def period_hints(query: str) -> list[str]:
 
 
 def make_nodes(corpus: Corpus):
+
+    def understand(state: GraphState) -> GraphState:
+        """查询理解（v0.5：LLM 是大脑的入口）。一次结构化抽取
+        intent/companies/period，驱动路由与 doc_scope；heuristic 与
+        LLM 故障时回退 rule_understand（双模式纪律不变）。"""
+        q = state["query"]
+        u: dict | None = None
+        trace: list[str] = []
+        if state["mode"] == "llm" and llmx.llm_enabled():
+            try:
+                r = llmx.chat_json(
+                    "你是财报问答系统的查询理解器。从用户问题抽取 JSON：\n"
+                    '{"intent":"metric|summary|compare|other",'
+                    '"companies":["公司名"],"period":"H1|Q1|Q3|FY|",'
+                    '"reason":"一句话"}\n'
+                    "规则：companies 原样取自问题中的公司名（没有则空数组）；"
+                    "period 按财报日历（一季度/一季报/Q1→Q1，半年度/中报/二季度→H1，"
+                    "三季→Q3，年度/年报/四季度→FY，未提及则空串）；"
+                    "intent：metric=问具体数字/指标/事实，summary=要概览/总结/分析，"
+                    "compare=对比多家公司，other=闲聊或超纲。", q)
+                intent = r.get("intent", "metric")
+                if intent not in ("metric", "summary", "compare", "other"):
+                    intent = "metric"
+                raw_period = str(r.get("period", ""))
+                ph = period_hints(raw_period)      # LLM 可能回「2026一季报」等口语
+                u = {"intent": intent,
+                     "companies": [c for c in r.get("companies", [])
+                                   if isinstance(c, str)][:4],
+                     "period": ph[0] if ph else "",
+                     "reason": str(r.get("reason", ""))[:80]}
+                trace = ["understand:llm"]
+            except Exception:
+                trace = ["understand:llm→fallback"]
+        else:
+            trace = ["understand:rule"]
+        if u is None:
+            u = rule_understand(q, corpus)
+        else:
+            # 公司名纠偏：LLM 幻觉出语料外的公司时，用规则命中的兜底
+            known = {d.company for d in corpus.docs.values() if d.company}
+            if not set(u["companies"]) <= known:
+                rule_hits = rule_understand(q, corpus)["companies"]
+                if rule_hits:
+                    u["companies"] = rule_hits
+        return {**state, "understanding": u, "trace": trace}
 
     def route(state: GraphState) -> GraphState:
         q = state["query"]
@@ -255,14 +333,15 @@ def make_nodes(corpus: Corpus):
                     "trace": [f"verify:degraded({cov})→extractive"]}
         return refuse({**state, "trace": [f"verify:degraded({cov})→refuse"]})
 
-    return route, retrieve, grade_docs, rewrite_query, generate, summarize_doc, refuse, verify_citations
+    return (understand, route, retrieve, grade_docs, rewrite_query, generate,
+            summarize_doc, refuse, verify_citations)
 
 
 # ── 条件边 ──────────────────────────────────────────────
 
 
 def build_graph(corpus: Corpus):
-    route, retrieve, grade, rewrite, generate, summarize, refuse, verify = make_nodes(corpus)
+    understand, route, retrieve, grade, rewrite, generate, summarize, refuse, verify = make_nodes(corpus)
 
     g = StateGraph(GraphState)
 
@@ -275,7 +354,9 @@ def build_graph(corpus: Corpus):
     g.add_node("refuse", refuse)
     g.add_node("verify_citations", verify)
 
-    g.add_edge(START, "route")
+    g.add_node("understand", understand)
+    g.add_edge(START, "understand")
+    g.add_edge("understand", "route")
 
     def after_route(state: GraphState) -> str:
         r = state.get("route", "metric")

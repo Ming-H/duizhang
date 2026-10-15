@@ -159,10 +159,65 @@ def test_period_filter_is_doc_level():
             return [Retrieved(Chunk(f"fy{i}", "欧科亿_2025FY", 88, i, "年报营业收入"),
                               0.1, i + 1) for i in range(8)]
 
-    _, retrieve, *_ = make_nodes(FakeCorpus())
+    _understand, _route, retrieve, *_ = make_nodes(FakeCorpus())
     st = new_state("欧科亿一季度营业收入同比增长多少")
     out = retrieve({**st, "effective_query": "欧科亿 一季度 营业收入 同比"})
     assert {h.chunk.doc_id for h in out["hits"]} == {"欧科亿_2026Q1"}
+
+
+# ── 查询理解（understand 节点） ─────────────────────────
+
+
+class _MiniCorpus:
+    """规则理解的假语料：三家公司不同期间。"""
+
+    def __init__(self):
+        from duizhang.schemas import Doc
+        self.docs = {
+            "欧科亿_2026Q1": Doc("欧科亿_2026Q1", "欧科亿", "2026Q1", "一季报", "x", 5),
+            "欧科亿_2025FY": Doc("欧科亿_2025FY", "欧科亿", "2025FY", "年报", "x", 100),
+            "海伦哲_2026Q1": Doc("海伦哲_2026Q1", "海伦哲", "2026Q1", "一季报", "y", 5),
+        }
+
+
+def test_rule_understand_multi_company_compare():
+    """规则理解：多公司全量命中（替代旧 _doc_filter 只回首个），
+    对比词 + 公司≥2 → compare 意图。"""
+    from duizhang.graph import rule_understand
+    u = rule_understand("对比欧科亿和海伦哲 2026 一季报的营业收入增长", _MiniCorpus())
+    assert u["intent"] == "compare"
+    assert set(u["companies"]) == {"欧科亿", "海伦哲"}
+    assert u["period"] == "Q1"
+
+
+def test_rule_understand_single_metric():
+    from duizhang.graph import rule_understand
+    u = rule_understand("欧科亿 2026 年半年度预计净利润多少", _MiniCorpus())
+    assert u["intent"] == "metric"
+    assert u["companies"] == ["欧科亿"]
+    assert u["period"] == "H1"
+
+
+def test_understand_node_llm_and_fallback(app, monkeypatch):
+    """understand 节点：llm 模式一次结构化抽取；LLM 故障回退规则并留痕。"""
+    from duizhang import llm as llmx
+    from duizhang.graph import make_nodes
+    understand = make_nodes(_MiniCorpus())[0]
+    monkeypatch.setattr(llmx, "llm_enabled", lambda: True)
+    monkeypatch.setattr(llmx, "chat_json", lambda s, u, **kw: {
+        "intent": "compare", "companies": ["欧科亿", "海伦哲"],
+        "period": "Q1", "reason": "对比两家"})
+    st = understand(new_state("对比欧科亿和海伦哲 2026 一季报营收", "llm"))
+    assert st["understanding"]["companies"] == ["欧科亿", "海伦哲"]
+    assert "understand:llm" in st["trace"]
+
+    def boom(s, u, **kw):
+        raise RuntimeError("llm down")
+
+    monkeypatch.setattr(llmx, "chat_json", boom)
+    st2 = understand(new_state("欧科亿 2026 年半年度预计净利润多少", "llm"))
+    assert st2["understanding"]["intent"] == "metric"     # 规则兜底
+    assert any("understand:llm→fallback" in t for t in st2["trace"])
 
 
 # ── 图行为 ──────────────────────────────────────────────
