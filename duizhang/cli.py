@@ -149,7 +149,7 @@ def cmd_docs(args):
 def cmd_eval(args):
     from duizhang.evalx import run_eval
     corp = _corpus_from_db()
-    run_eval(corp, mode=args.mode)
+    run_eval(corp, mode=args.mode, dataset=args.dataset)
 
 
 def main():
@@ -174,8 +174,10 @@ def main():
     p = sub.add_parser("docs", help="列出已入库文档")
     p.set_defaults(fn=cmd_docs)
 
-    p = sub.add_parser("eval", help="跑内置评估集")
+    p = sub.add_parser("eval", help="跑内置评估集（agent 集含多跳对比题）")
     p.add_argument("--mode", default="auto", choices=["auto", "llm", "heuristic"])
+    p.add_argument("--dataset", default="default", choices=["default", "agent"],
+                   help="default=单跳 10 题（CI 回归）；agent=多跳对比 8 题（llm 模式）")
     p.set_defaults(fn=cmd_eval)
 
     args = ap.parse_args()

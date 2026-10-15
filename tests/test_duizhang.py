@@ -325,6 +325,20 @@ def test_corrective_loop_bounded(app):
     assert st["verdict"] in ("pass", "degraded")
 
 
+def test_eval_judge_expect_docs():
+    """对比题判定：expect_docs 列表里的每个期望文档都要在 hits 或
+    citations 中出现——只中一家不算过。"""
+    from duizhang.evalx import judge
+    case = {"q": "对比", "expect_keywords": ["k"], "expect_docs": ["欧科亿_2026Q1", "海伦哲_2026Q1"]}
+    both = {"answer": "k", "citations": [],
+            "hits": [_hit("a", "欧科亿_2026Q1", 1, 0, "k", 1),
+                     _hit("b", "海伦哲_2026Q1", 1, 0, "k", 2)]}
+    assert judge(case, both)["ok"] is True
+    one_only = {"answer": "k", "citations": [],
+                "hits": [_hit("a", "欧科亿_2026Q1", 1, 0, "k", 1)]}
+    assert judge(case, one_only)["ok"] is False
+
+
 # ── 评估 ────────────────────────────────────────────────
 
 
