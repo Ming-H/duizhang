@@ -167,14 +167,15 @@ def main():
 
     p = sub.add_parser("ask", help="提问")
     p.add_argument("query")
-    p.add_argument("--mode", default="heuristic", choices=["heuristic", "llm"])
+    p.add_argument("--mode", default="auto", choices=["auto", "llm", "heuristic"],
+                   help="auto=有 key 走 llm 无 key 走 heuristic（默认）")
     p.set_defaults(fn=cmd_ask)
 
     p = sub.add_parser("docs", help="列出已入库文档")
     p.set_defaults(fn=cmd_docs)
 
     p = sub.add_parser("eval", help="跑内置评估集")
-    p.add_argument("--mode", default="heuristic", choices=["heuristic", "llm"])
+    p.add_argument("--mode", default="auto", choices=["auto", "llm", "heuristic"])
     p.set_defaults(fn=cmd_eval)
 
     args = ap.parse_args()

@@ -54,3 +54,19 @@ def test_chat_kwargs_thinking_gating(monkeypatch):
     monkeypatch.delenv("DZ_LLM_THINKING", raising=False)
     monkeypatch.setenv("DZ_LLM_BASE_URL", "https://api.deepseek.com/v1")
     assert "extra_body" not in llm._chat_kwargs(512)
+
+
+def test_auto_mode_resolution(monkeypatch):
+    """mode=auto：有 key 走 llm（LLM 是大脑），无 key 走 heuristic（兜底），
+    trace 记录解析结果；显式模式原样通过。"""
+    from duizhang.schemas import new_state
+    monkeypatch.delenv("DZ_LLM_API_KEY", raising=False)
+    st = new_state("q", "auto")
+    assert st["mode"] == "heuristic"
+    assert any("mode:heuristic" in t for t in st["trace"])
+    monkeypatch.setattr(llm, "llm_enabled", lambda: True)
+    st2 = new_state("q", "auto")
+    assert st2["mode"] == "llm"
+    assert any("mode:llm" in t for t in st2["trace"])
+    st3 = new_state("q", "heuristic")
+    assert st3["mode"] == "heuristic" and st3["trace"] == ["start"]

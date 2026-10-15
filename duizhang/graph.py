@@ -311,7 +311,7 @@ def build_graph(corpus: Corpus):
     return g.compile()
 
 
-def ask(corpus: Corpus, query: str, mode: str = "heuristic") -> GraphState:
+def ask(corpus: Corpus, query: str, mode: str = "auto") -> GraphState:
     """一条命令问答：建图 → invoke。"""
     app = build_graph(corpus)
     from duizhang.schemas import new_state

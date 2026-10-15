@@ -87,12 +87,19 @@ class GraphState(TypedDict, total=False):
     trace: Annotated[list[str], operator.add]   # 执行轨迹（append 语义）
 
 
-def new_state(query: str, mode: str = "heuristic") -> GraphState:
+def new_state(query: str, mode: str = "auto") -> GraphState:
+    """mode=auto：有 key 走 llm（LLM 是大脑），无 key 走 heuristic（兜底）。"""
+    if mode == "auto":
+        from duizhang import llm
+        mode = "llm" if llm.llm_enabled() else "heuristic"
+        trace = ["start", f"mode:{mode}"]
+    else:
+        trace = ["start"]
     return GraphState(
         query=query,
         effective_query=query,
         mode=mode,
         retries=0,
         rewritten=False,
-        trace=["start"],
+        trace=trace,
     )

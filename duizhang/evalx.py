@@ -43,7 +43,7 @@ def judge(case: dict, st: dict) -> dict:
                 expect_refused=bool(case.get("expect_refused")))
 
 
-def run_eval(corpus, mode: str = "heuristic", verbose: bool = True) -> dict:
+def run_eval(corpus, mode: str = "auto", verbose: bool = True) -> dict:
     from duizhang.graph import build_graph
     from duizhang.schemas import new_state
 
