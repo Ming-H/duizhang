@@ -220,6 +220,46 @@ def test_understand_node_llm_and_fallback(app, monkeypatch):
     assert any("understand:llm→fallback" in t for t in st2["trace"])
 
 
+def test_route_consumes_understanding():
+    """route 纯函数化：消费 understand 的 intent 分发（不再自己调
+    LLM/关键词），compare 意图透传；无 understanding 时规则兜底。"""
+    from duizhang.graph import make_nodes
+    _understand, route, *_ = make_nodes(_MiniCorpus())
+    st = new_state("随便什么query，关键词不该决定路由", "heuristic")
+    st = {**st, "understanding": {"intent": "summary", "companies": ["欧科亿"],
+                                  "period": "", "reason": "LLM 说要概览"}}
+    assert route(st)["route"] == "summary"
+    st2 = {**st, "understanding": {"intent": "compare",
+                                   "companies": ["欧科亿", "海伦哲"],
+                                   "period": "Q1", "reason": "对比"}}
+    assert route(st2)["route"] == "compare"
+    out3 = route(new_state("欧科亿 2026 年半年度预计净利润多少", "heuristic"))
+    assert out3["route"] == "metric"
+
+
+def test_retrieve_scopes_from_understanding():
+    """retrieve 的 doc_scope 由 understanding 的公司+期间构建——
+    LLM 理解直接驱动检索限定，替代旧的字符串子串猜测。"""
+
+    class ScopeCorpus:
+        def __init__(self):
+            self.docs = _MiniCorpus().docs
+            self.calls = []
+
+        def search(self, q, k=8, doc_filter="", doc_scope=None):
+            self.calls.append(doc_scope)
+            return []
+
+    sc = ScopeCorpus()
+    from duizhang.graph import make_nodes
+    _u, _r, retrieve, *_ = make_nodes(sc)
+    st = new_state("欧科亿一季度营收", "heuristic")
+    st = {**st, "understanding": {"intent": "metric", "companies": ["欧科亿"],
+                                  "period": "Q1", "reason": "r"}}
+    retrieve(st)
+    assert sc.calls[-1] == {"欧科亿_2026Q1"}   # 该公司 + 该期间的文档集合
+
+
 # ── 图行为 ──────────────────────────────────────────────
 
 

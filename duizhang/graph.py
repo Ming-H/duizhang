@@ -149,23 +149,12 @@ def make_nodes(corpus: Corpus):
         return {**state, "understanding": u, "trace": trace}
 
     def route(state: GraphState) -> GraphState:
+        """纯函数分发（v0.5）：消费 understand 的 intent——理解已在
+        understand 节点完成（LLM 或规则），这里只做分发与期间守卫，
+        不再调 LLM/关键词。"""
         q = state["query"]
-        fallback: list[str] = []      # LLM 故障降级留痕（trace 是 append 语义）
-        if state["mode"] == "llm" and llmx.llm_enabled():
-            try:
-                r = llmx.chat_json(
-                    "你是财报问答系统的路由器。分类 query 并返回 JSON："
-                    '{"route":"metric|summary|other","reason":"一句话"}。'
-                    "metric=问具体数字/指标/事实；summary=要概览或分析；other=闲聊或超纲。",
-                    q)
-                return {**state, "route": r.get("route", "metric"),
-                        "route_reason": r.get("reason", "")[:80], "trace": ["route:llm"]}
-            except Exception:
-                fallback = ["route:llm→fallback"]   # 静默降级到规则，但可见
-        # 摘要意图优先判定：否则「总结业绩预告」会被「预告」劫持到 metric
-        if any(w in q for w in ("总结", "摘要", "概览", "要点", "怎么样", "如何看", "怎么看", "观点")):
-            return {**state, "route": "summary", "route_reason": "命中摘要词",
-                    "trace": fallback + ["route:summary"]}
+        u = state.get("understanding") or rule_understand(q, corpus)
+        intent = u.get("intent", "metric")
         # 期间守卫：query 里的年份若库中全无对应报告，先对账再回答——拒。
         q_years = {y for y in re.findall(r"(20\d{2})", q)}
         have_years = {d.period[:4] for d in corpus.docs.values() if d.period[:4].isdigit()}
@@ -175,37 +164,30 @@ def make_nodes(corpus: Corpus):
                     f"（现有期间：{periods}）。对不上账，不硬答。",
                     "citations": [], "verdict": "refused",
                     "route": "other", "route_reason": "期间不在库",
-                    "trace": fallback + ["route:period-guard→refuse"]}
-        if any(w in q for w in ("多少", "几个点", "占比", "增长率", "率", "每股",
-                                "营收", "收入", "利润", "净利", "毛利", "现金流", "订单", "在手", "手持",
-                                "亿元", "万元", "同比", "环比", "预告")):
-            return {**state, "route": "metric", "route_reason": "命中指标词",
-                    "trace": fallback + ["route:metric"]}
-        return {**state, "route": "other", "route_reason": "未命中意图词",
-                "trace": fallback + ["route:other"]}
-
-    def _doc_filter(query: str) -> str:
-        for doc_id in corpus.docs:
-            company = corpus.docs[doc_id].company
-            if company and company in query:
-                return company
-        return ""
+                    "trace": ["route:period-guard→refuse"]}
+        return {**state, "route": intent,
+                "route_reason": (u.get("reason") or intent)[:80],
+                "trace": [f"route:{intent}"]}
 
     def retrieve(state: GraphState) -> GraphState:
+        """检索：doc_scope 由 understanding 的公司+期间构建——LLM 理解
+        直接驱动检索限定（v0.4 的字符串子串猜测退役，仅规则兜底时等价）。"""
         q = state["effective_query"]
         eff = expand_query(q)
-        hints = period_hints(state["query"])
-        filt = _doc_filter(q)
+        u = state.get("understanding") or rule_understand(state["query"], corpus)
+        companies = u.get("companies") or []
+        period = u.get("period") or ""
+        filt = companies[0] if len(companies) == 1 else ""
         raw = corpus.search(eff, k=TOP_K, doc_filter=filt)
         hits = raw
-        # 期间硬过滤（文档级）：问「半年度/一季报」而该公司有对应期间文档时，
-        # 其它期间全是噪声——海量年报块会淹没目标期间（命中级后过滤会把
-        # 目标块挤出 top-8，exact 落空回退到未过滤结果 = 拿年报答一季报，
-        # 全量库实测），所以限定 doc 集合重查一次。
-        if hints:
+        # 期间硬过滤（文档级）：该公司有对应期间文档时，其它期间全是噪声
+        # ——海量年报块会淹没目标期间（命中级后过滤会把目标块挤出 top-8，
+        # exact 落空回退未过滤结果 = 拿年报答一季报，v0.4 实测），限定
+        # doc 集合重查一次。
+        if period:
             allowed = {d for d, doc in corpus.docs.items()
-                       if (not filt or filt in d or filt in doc.company)
-                       and any(ht in doc.period for ht in hints)}
+                       if (not companies or doc.company in companies)
+                       and period in doc.period}
             if allowed:
                 scoped = corpus.search(eff, k=TOP_K, doc_filter=filt, doc_scope=allowed)
                 if scoped:
@@ -286,7 +268,9 @@ def make_nodes(corpus: Corpus):
     # 仅重叠则垃圾词偶合可过——两者互补。
 
     def summarize_doc(state: GraphState) -> GraphState:
-        filt = _doc_filter(state["query"])
+        u = state.get("understanding") or rule_understand(state["query"], corpus)
+        companies = u.get("companies") or []
+        filt = companies[0] if len(companies) == 1 else ""
         target = None
         q_toks = set(word_tokens(state["query"])) - {"怎么样", "怎么看", "如何", "观点", "总结", "摘要"}
         # 域词守卫：遍历前6命中，找到「分数达标 且 ≥2 词元重叠」的第一个；
