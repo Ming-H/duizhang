@@ -1,0 +1,56 @@
+"""LLM 层：.env 装载 / 智谱默认值 / JSON 容错 / thinking 控制（全离线）。"""
+
+
+import pytest
+
+from duizhang import llm
+
+
+def test_load_dotenv_reads_and_does_not_override(tmp_path):
+    """KEY=VALUE 逐行装载；已存在的环境变量不覆盖（env 优先于 .env）。"""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'DZ_LLM_API_KEY="key123"\nDZ_LLM_MODEL=glm-4.6\n'
+        "# 注释行\nBADLINE 无等号\n\n", encoding="utf-8")
+    env: dict[str, str] = {"DZ_LLM_MODEL": "glm-4-flash"}   # 已存在
+    llm._load_dotenv(env_file, env=env)
+    assert env["DZ_LLM_API_KEY"] == "key123"
+    assert env["DZ_LLM_MODEL"] == "glm-4-flash"      # 未被 .env 覆盖
+
+
+def test_load_dotenv_missing_file_is_noop(tmp_path):
+    env: dict[str, str] = {}
+    llm._load_dotenv(tmp_path / "absent.env", env=env)
+    assert env == {}
+
+
+def test_zhipu_defaults():
+    """智谱 GLM 是默认 provider：任意 OpenAI 兼容端点仍可用 env 覆盖。"""
+    assert "open.bigmodel.cn/api/paas/v4" in llm.DEFAULT_BASE_URL
+    assert llm.DEFAULT_MODEL == "glm-4.5-flash"   # 免费档，开箱可用
+
+
+def test_parse_json_tolerant():
+    """思考型模型可能把 JSON 包进代码围栏或前后缀——容错取首个平衡对象。"""
+    assert llm._parse_json('{"ok": true}') == {"ok": True}
+    assert llm._parse_json('```json\n{"route": "metric"}\n```') == {"route": "metric"}
+    assert llm._parse_json('好的，结果是 {"a": {"b": 1}} 以上。') == {"a": {"b": 1}}
+    with pytest.raises(ValueError):
+        llm._parse_json("完全不是 JSON")
+
+
+def test_chat_kwargs_thinking_gating(monkeypatch):
+    """GLM 思考模式默认关（结构化小任务省时省钱）；仅智谱端点附加扩展参数，
+    其它兼容端点（如 deepseek）不认识这个参数绝不发送。"""
+    monkeypatch.delenv("DZ_LLM_THINKING", raising=False)
+    monkeypatch.delenv("DZ_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("DZ_LLM_MAX_TOKENS", raising=False)
+    # 智谱端点（默认）→ 附加 thinking off
+    assert llm._chat_kwargs(512)["extra_body"] == {"thinking": {"type": "disabled"}}
+    # 显式打开思考 → 不附加
+    monkeypatch.setenv("DZ_LLM_THINKING", "enabled")
+    assert "extra_body" not in llm._chat_kwargs(512)
+    # 非智谱端点 → 不附加
+    monkeypatch.delenv("DZ_LLM_THINKING", raising=False)
+    monkeypatch.setenv("DZ_LLM_BASE_URL", "https://api.deepseek.com/v1")
+    assert "extra_body" not in llm._chat_kwargs(512)
