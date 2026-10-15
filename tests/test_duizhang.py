@@ -260,6 +260,34 @@ def test_retrieve_scopes_from_understanding():
     assert sc.calls[-1] == {"欧科亿_2026Q1"}   # 该公司 + 该期间的文档集合
 
 
+def test_compare_decomposes_and_merges_both_companies():
+    """compare 多跳：按公司 doc_scope 各自检索、交错合并——两家证据
+    都在场；某公司无命中时另一家照常（不空手）。"""
+    from duizhang.graph import build_graph
+    from duizhang.schemas import Chunk, Doc, Retrieved
+
+    class DecomposeCorpus:
+        def __init__(self):
+            self.docs = {
+                "欧科亿_2026Q1": Doc("欧科亿_2026Q1", "欧科亿", "2026Q1", "一季报", "x", 5),
+                "海伦哲_2026Q1": Doc("海伦哲_2026Q1", "海伦哲", "2026Q1", "一季报", "y", 5),
+            }
+
+        def search(self, q, k=8, doc_filter="", doc_scope=None):
+            out = [Retrieved(Chunk(f"{d}#c{i}", d, 1, i,
+                                   f"{d} 营业收入 100,000 万元 同比增长"),
+                              0.2, i + 1)
+                   for d in (doc_scope or []) for i in range(2)]
+            return out[:k]
+
+    app = build_graph(DecomposeCorpus())
+    st = app.invoke(new_state("对比欧科亿和海伦哲 2026 一季报的营业收入增长", "heuristic"))
+    assert st["route"] == "compare"
+    assert any("decompose:" in t for t in st["trace"])
+    assert {h.chunk.doc_id for h in st["hits"]} == {"欧科亿_2026Q1", "海伦哲_2026Q1"}
+    assert st["answer"]
+
+
 # ── 图行为 ──────────────────────────────────────────────
 
 

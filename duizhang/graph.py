@@ -238,6 +238,33 @@ def make_nodes(corpus: Corpus):
                 "retries": state.get("retries", 0) + 1,
                 "trace": fallback + ["rewrite"]}
 
+    def decompose(state: GraphState) -> GraphState:
+        """compare 多跳分解（v0.5）：按公司拆子查询、各自公司+期间
+        doc_scope 检索、交错合并——两家证据都在场且不被单方淹没，
+        后续 grade/generate/verify 走既有路径（对账闸门不豁免）。"""
+        u = state.get("understanding") or rule_understand(state["query"], corpus)
+        companies = [c for c in (u.get("companies") or []) if c] or [""]
+        period = u.get("period") or ""
+        per: dict[str, list] = {}
+        k_each = max(4, TOP_K // len(companies))
+        for comp in companies:
+            scope = {d for d, doc in corpus.docs.items()
+                     if (not comp or doc.company == comp)
+                     and (not period or period in doc.period)}
+            sub = f"{comp} {state['query']}" if comp else state["query"]
+            hits = corpus.search(expand_query(sub), k=k_each,
+                                 doc_filter=comp, doc_scope=scope or None)
+            if hits:
+                per[comp] = hits
+        # 交错合并：公司间轮流取——单方大文档不能挤掉另一方的证据
+        merged: list = []
+        for r in range(max((len(v) for v in per.values()), default=0)):
+            for hits in per.values():
+                if r < len(hits):
+                    merged.append(hits[r])
+        return {**state, "hits": merged[:TOP_K],
+                "trace": [f"decompose:{'|'.join(per)} → {len(merged)} hits"]}
+
     def generate(state: GraphState) -> GraphState:
         hits = state["hits"]
         fallback: list[str] = []
@@ -318,19 +345,21 @@ def make_nodes(corpus: Corpus):
         return refuse({**state, "trace": [f"verify:degraded({cov})→refuse"]})
 
     return (understand, route, retrieve, grade_docs, rewrite_query, generate,
-            summarize_doc, refuse, verify_citations)
+            decompose, summarize_doc, refuse, verify_citations)
 
 
 # ── 条件边 ──────────────────────────────────────────────
 
 
 def build_graph(corpus: Corpus):
-    understand, route, retrieve, grade, rewrite, generate, summarize, refuse, verify = make_nodes(corpus)
+    understand, route, retrieve, grade, rewrite, generate, decompose, summarize, refuse, verify = make_nodes(corpus)
 
     g = StateGraph(GraphState)
 
+    g.add_node("understand", understand)
     g.add_node("route", route)
     g.add_node("retrieve", retrieve)
+    g.add_node("decompose", decompose)
     g.add_node("grade_docs", grade)
     g.add_node("rewrite_query", rewrite)
     g.add_node("generate", generate)
@@ -338,21 +367,22 @@ def build_graph(corpus: Corpus):
     g.add_node("refuse", refuse)
     g.add_node("verify_citations", verify)
 
-    g.add_node("understand", understand)
     g.add_edge(START, "understand")
     g.add_edge("understand", "route")
 
     def after_route(state: GraphState) -> str:
         r = state.get("route", "metric")
         return {"metric": "retrieve", "summary": "summarize_doc",
-                "other": "refuse"}[r]
+                "compare": "decompose", "other": "refuse"}[r]
 
     g.add_conditional_edges("route", after_route,
                             {"retrieve": "retrieve",
                              "summarize_doc": "summarize_doc",
+                             "decompose": "decompose",
                              "refuse": "refuse"})
 
     g.add_edge("retrieve", "grade_docs")
+    g.add_edge("decompose", "grade_docs")    # 多跳合并后走同一条对账路径
 
     def after_grade(state: GraphState) -> str:
         if state.get("sufficient"):
