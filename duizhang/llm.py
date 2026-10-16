@@ -192,3 +192,34 @@ def chat_text(system: str, user: str, max_tokens: int = 800) -> str:
         max_tokens=_max_tokens(max_tokens),
     )
     return resp.choices[0].message.content or ""
+
+
+def chat_with_tools(messages: list[dict], tools: list[dict],
+                    max_tokens: int = 1024) -> dict:
+    """工具调用单步原语（本地 Ollama 原生 tools；qwen3.5:0.8b 实测可用）。
+    返回归一化 {content: str, tool_calls: [{name, arguments: dict}]}——
+    arguments 兼容字符串/缺省形态。远端模式不支持工具：调用方回退固定管线。"""
+    if not _use_local():
+        raise NotImplementedError("tools 仅本地通道支持（远端走固定管线）")
+    base = _base_url().rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    r = _http_post_json(f"{base}/api/chat", {
+        "model": os.environ.get("DZ_LLM_MODEL", DEFAULT_MODEL),
+        "stream": False,
+        "think": _local_think(),
+        "tools": tools,
+        "options": {"temperature": 0, "num_predict": _max_tokens(max_tokens)},
+        "messages": messages})
+    m = r.get("message") or {}
+    calls = []
+    for tc in m.get("tool_calls") or []:
+        fn = tc.get("function") or {}
+        args = fn.get("arguments", {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                args = {}
+        calls.append({"name": fn.get("name", ""), "arguments": args or {}})
+    return {"content": m.get("content") or "", "tool_calls": calls}

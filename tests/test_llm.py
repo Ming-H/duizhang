@@ -101,7 +101,33 @@ def test_anthropic_protocol_detection_and_dispatch(monkeypatch):
     assert llm.chat_text("sys", "user").strip().startswith("```")
 
 
-def test_base_url_detection(monkeypatch):
+def test_chat_with_tools_local_native(monkeypatch):
+    """工具调用原语：本地走 Ollama 原生 tools（实测 0.8b 可靠），
+    归一化返回 {content, tool_calls:[{name, arguments}]}——
+    arguments 统一为 dict（兼容字符串/缺省形态）。"""
+
+    captured = {}
+
+    def fake_post(url, payload, timeout=300):
+        captured["payload"] = payload
+        return {"message": {"content": "", "tool_calls": [{
+            "function": {"name": "search", "arguments": {"query": "营收"}}}]}}
+
+    monkeypatch.setattr(llm, "_http_post_json", fake_post)
+    monkeypatch.setenv("DZ_LLM_BASE_URL", "http://localhost:11434/v1")
+    out = llm.chat_with_tools(
+        [{"role": "user", "content": "q"}],
+        tools=[{"type": "function", "function": {"name": "search",
+                "parameters": {"type": "object", "properties": {}}}}])
+    assert out["tool_calls"] == [{"name": "search", "arguments": {"query": "营收"}}]
+    assert captured["payload"]["tools"][0]["function"]["name"] == "search"
+
+    # arguments 为 JSON 字符串的形态也归一化
+    def fake_post2(url, payload, timeout=300):
+        return {"message": {"content": "最终答案", "tool_calls": []}}
+    monkeypatch.setattr(llm, "_http_post_json", fake_post2)
+    out2 = llm.chat_with_tools([{"role": "user", "content": "q"}], tools=[])
+    assert out2 == {"content": "最终答案", "tool_calls": []}
     monkeypatch.setenv("DZ_LLM_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
     assert llm._use_anthropic() is True
     monkeypatch.setenv("DZ_LLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/")

@@ -51,15 +51,15 @@ EOF
 ingest `samples/` 后再 ingest `data/corpus`，两个根的文档共存，
 删除/孤儿清理只对本次扫描的根负责）。
 
-## 这张图在做什么（v0.5：Agentic RAG）
+## 这张图在做什么（v0.6：真 Agent 环）
 
 ```
-START → understand ──→ route ──metric──→ retrieve → grade_docs ──insufficient(retries<1)──→ rewrite_query ─┐
-      （LLM 结构化理解：    │       │                        │                                   （改写后重检索）│
-       intent/公司/期间，    │       └─compare─→ decompose ───┤                                          ↑
-       规则兜底）           │       （按公司拆子查询，          ↓ sufficient                               │
-                           │           交错合并）          generate ──→ verify_citations ──fail──→ 抽取式降级/拒答
-                           ├─summary─→ summarize_doc     （LLM grounded / 抽取式）
+START → understand ──→ route ──metric/compare(llm)──→ 【agent_research 工具循环】──→ generate ──→ verify_citations
+      （LLM 结构化理解：    │                          模型自主决定查什么/查几次/何时收手      （确定性闸门，不豁免）
+       intent/公司/期间，    │                          单一 search 工具；步数≤6；幂等缓存；        ↓ fail
+       规则兜底）           │                          理解先验优先于工具参数                抽取式降级/拒答
+                           ├─metric/compare(heuristic)→ retrieve/decompose → grade ⇄ rewrite(≤1) ↗
+                           ├─summary─→ summarize_doc
                            └─other──→ refuse
 ```
 
@@ -69,6 +69,7 @@ START → understand ──→ route ──metric──→ retrieve → grade_do
 |------|--------|
 | **understand 查询理解** | LLM 一次抽取 intent/公司/期间，直接驱动路由与 `doc_scope` 检索限定——v0.4 的关键词子串猜测是三轮 bug 的根源，理解交给模型、规则只做兜底。 |
 | **compare 多跳分解** | 「对比 A 和 B」按公司拆子查询、各自公司+期间 doc_scope 检索、交错合并——两家证据都在场，且**多跳不豁免对账闸门**。 |
+| **真 Agent 环（v0.6）** | llm 模式下检索交给模型：单一 search 工具 + 循环，模型自主决定查什么、何时收手；步数硬上限 + 幂等缓存防小模型死循环，理解先验优先于工具参数防幻觉参数——自主检索照样过对账闸门。 |
 | **Corrective-RAG 纠错环** | `grade_docs → rewrite_query → retrieve` 的**有界**重试（≤1，条件边实现）。检索不足先改写重查一次，还不行才拒答——无界重试是状态机的反模式。 |
 | **期间守卫 + 文档级期间过滤** | 问「2030 年净利润」直接拒（年份来自元数据不靠模型）；问「半年度」时限定该公司对应期间的文档集合重查——年报大文档块会淹没目标期间（v0.4 实测教训）。 |
 | **自由规划、强制对账** | LLM 判无据 → 降级抽取式而非拒答；覆盖率闸门只考核数字句（编造风险所在）、token 过元词过滤；闸门是确定性代码，模型无权跳过。 |
@@ -95,9 +96,9 @@ START → understand ──→ route ──metric──→ retrieve → grade_do
 | 数据集 | 模式 | retrieval@3 | answer hit | refusal |
 |---|---|---|---|---|
 | default（10 题，CI 回归） | heuristic | 1.00 | 1.00 | 1.00 |
-| default | llm（qwen3.5:0.8b 本地） | 0.875 | 0.875 | 1.00 |
+| default | llm（qwen3.5:0.8b 本地，Agent 环） | 0.875 | 0.875 | 1.00 |
 | agent（3 对比 + 3 单跳/摘要 + 2 陷阱） | heuristic | 1.00 | 1.00 | 1.00 |
-| agent | **llm（qwen3.5:0.8b 本地）** | **1.00** | **1.00** | **1.00** |
+| agent | **llm（qwen3.5:0.8b 本地，Agent 环）** | **1.00** | **1.00** | **1.00** |
 | agent | llm（glm-5.3 远端，对照） | 1.00 | 1.00 | 1.00 |
 
 **架构比模型更保命**：0.8b 本地小模型的生成质量不足时，verify 闸门
@@ -108,7 +109,7 @@ START → understand ──→ route ──metric──→ retrieve → grade_do
 Q1 净利润证据 → 对比作答。历史修复记录见 `docs/DESIGN-v0.4.md` §5、
 `docs/DESIGN-v0.5.md`。
 
-单元测试（49 用例：分块/理解/守卫/纠错环/分解/Store 幽灵块/多根摄取/
+单元测试（52 用例：分块/理解/守卫/纠错环/分解/Store 幽灵块/多根摄取/
 对账口径/思考分层/.env，conftest 封网永不外呼）：
 
 ```bash
@@ -138,7 +139,7 @@ duizhang/
 ├── llm.py          # LLM 层：智谱 GLM 默认，.env 装载，思考分层，任意兼容端点可换
 ├── evalx.py        # 评估 runner（default/agent 双数据集）
 └── cli.py          # ingest / index / ask / eval / docs
-tests/              # 49 用例（conftest 封网：永不外呼 LLM）
+tests/              # 52 用例（conftest 封网：永不外呼 LLM）
 evals/              # dataset.json（10 题）+ dataset-agent.json（8 题含多跳对比）
 samples/            # 3 家公司 5 份真实财报（巨潮）
 docs/               # 设计文档 ×4 + EXPLAINER 讲解 + 流程动效图

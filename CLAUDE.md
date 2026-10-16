@@ -23,7 +23,7 @@ python -m duizhang.cli docs             # list ingested docs
 python -m duizhang.cli index            # (re)build FTS for existing chunks
 
 # Tests / lint
-pytest                                  # 49 cases; conftest blocks all real LLM calls
+pytest                                  # 52 cases; conftest blocks all real LLM calls
 pytest tests/test_store.py::test_readd_after_drop_no_ghost   # one test
 ruff check .                            # lint (CI enforces)
 ```
@@ -41,10 +41,11 @@ Two planes, one SQLite file (`docs` / `chunks` / `fts_w` / `fts_c` / `manifest`)
 **Online QA graph** (`graph.py`) — LangGraph state machine over `GraphState` (narrow-interface TypedDict; `trace` has append semantics):
 
 ```
-START → understand ─→ route ─metric─→ retrieve → grade_docs ⇄(≤1) rewrite_query
-       （LLM 抽取          │─compare→ decompose（按公司拆解、交错合并）→ grade
-        intent/公司/期间，   │─summary→ summarize_doc                      ↓ generate
-        规则兜底）          └─other──→ refuse                    verify_citations（确定性闸门）
+START → understand ─→ route ─metric/compare(llm)─→ agent_research（工具循环：单一 search 工具，
+       （LLM 抽取          │                          模型自主迭代检索，步数≤6，幂等缓存+重复收手，
+        intent/公司/期间，   │─metric/compare(heuristic)→ retrieve/decompose→grade⇄rewrite  理解先验优先）
+        规则兜底）          │─summary→ summarize_doc        ↓ generate → verify_citations（确定性闸门）
+                            └─other──→ refuse
 ```
 
 **Retrieval** (`fts.py` + `index.py`) — dual-track FTS5 + RRF (k=60): word track (jieba + unicode61) and char track (trigram, whitespace-stripped, ≤200 chars — truncates 14.2% of chunks by design, word track covers full text). `understanding` (from the understand node) drives `doc_scope`: exact company match + period restriction at the doc level. `expand_query` maps colloquial terms to report terminology (营收→营业收入, 赚→净利润, 原因→主要系).
@@ -53,7 +54,7 @@ START → understand ─→ route ─metric─→ retrieve → grade_docs ⇄(�
 
 1. **`Store` (`store.py`) is the ONLY writer to the four tables.** fts rowids align to `chunks.rowid`; re-add = drop-then-insert (never `INSERT OR REPLACE` on chunks). `chunks(doc_id)` is indexed in SCHEMA (legacy DBs auto-migrate on next Store open). `tests/test_store.py` is the permanent regression guard.
 2. **One graph, two brains.** Every LLM decision point falls back to rules on failure **with a trace marker** (`understand:llm→fallback` etc.). `--mode auto` resolves at `new_state`: llm if key present, else heuristic. Tests never make real LLM calls (conftest strips the key).
-3. **The corrective loop is bounded** (`MAX_RETRIES = 1`). compare/decompose joins the same grade→generate→verify path — multi-hop is never exempt from the reconciliation gate.
+3. **The corrective loop is bounded** (`MAX_RETRIES = 1` heuristic; `MAX_AGENT_STEPS = 6` for the agent loop). llm-mode metric/compare route into `agent_research` (single search tool; the model iterates autonomously). Guardrails the loop needs with small models (all measured, DESIGN-v0.6.md): idempotent call cache + early stop on all-repeat batches; understanding priors OVERRIDE tool args for period (0.8b hallucinates FY) and backfill company/period when omitted; agent search terms are written into `effective_query`; evidence pool emits round-robin by doc. Agent-collected evidence still goes through generate→verify — autonomy never exempts the gate.
 4. **Refusal over fabrication.** Gates: period guard in `route` (year from doc metadata, not the model); doc-level period filter (`period_hints` is mutually exclusive — "半年度" contains "年度", substring-ordered ifs let FY leak, round-4 bug R-1); `verify_citations` (evidence pool = cited chunks incl. num_notes, meta-token-filtered both sides, numeric sentences only, newline-aware splitting; < 0.45 → degrade to extractive; LLM no-evidence → extractive, not refuse).
 5. **SQLite PRAGMAs are per-connection** (`fts._apply_pragmas` every search; Store sets WAL + synchronous=NORMAL; `store.analyze()` after changed ingests).
 6. **Multi-root ingest**: deletion/orphan cleanup scoped to the scan root (`under_root` in `cli.py`). `--rebuild` still wipes everything.

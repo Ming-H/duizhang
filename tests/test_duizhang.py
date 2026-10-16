@@ -313,6 +313,140 @@ def test_boilerplate_strips_page_number_suffixed_headers():
     assert all("营业收入" in p for p in out)         # 正文不受影响
 
 
+class _AgentCorpus:
+    """agent 循环的假语料：记录 search 调用，返回固定命中。"""
+
+    def __init__(self):
+        from duizhang.schemas import Doc, Retrieved
+        self.docs = {
+            "欧科亿_2026Q1": Doc("欧科亿_2026Q1", "欧科亿", "2026Q1", "一季报", "x", 5),
+            "海伦哲_2026Q1": Doc("海伦哲_2026Q1", "海伦哲", "2026Q1", "一季报", "y", 5),
+        }
+        self.calls = []
+        self._R = Retrieved
+
+    def search(self, query, k=8, doc_filter="", doc_scope=None):
+        from duizhang.schemas import Chunk
+        self.calls.append((query, doc_scope))
+        out = []
+        for d in (doc_scope or list(self.docs)):
+            for i in range(3):          # 每家 3 块：复现「单方连续占位」的插入序
+                out.append(self._R(chunk=Chunk(f"{d}#c{i}", d, 1, i,
+                                                f"{d} 营业收入 100,00{i} 万元"),
+                                    score=0.2, rank=len(out) + 1))
+        return out[:k]
+
+
+def test_agent_research_loop_bounded_and_fallback(app, monkeypatch):
+    """真 Agent 环：模型自主决定调 search、何时收手；步数硬上限 6；
+    工具失败/无证据回退固定检索管线（不空手）。"""
+    from duizhang import llm as llmx
+    from duizhang.graph import make_nodes
+    nodes = make_nodes(_AgentCorpus())
+    agent = nodes[10]
+    monkeypatch.setattr(llmx, "llm_enabled", lambda: True)
+
+    # 场景 1：搜一次即收手
+    replies = iter([
+        {"content": "", "tool_calls": [
+            {"name": "search", "arguments": {"query": "营业收入",
+                                             "company": "欧科亿", "period": "Q1"}}]},
+        {"content": "证据足够", "tool_calls": []},
+    ])
+    monkeypatch.setattr(llmx, "chat_with_tools", lambda m, t, **kw: next(replies))
+    st = agent(new_state("欧科亿一季度营收", "llm"))
+    assert st["hits"] and st["hits"][0].chunk.doc_id == "欧科亿_2026Q1"
+    assert any(t.startswith("agent:") for t in st["trace"])
+    # Agent 的检索词写进 effective_query——下游抽取式/verify 用它打分，
+    # 原始口语 query（「哪家赚得多」）与证据零重叠会误拒（实测）
+    assert "营业收入" in st["effective_query"]
+
+    # 场景 2：不停调用且每次换参数（绕开重复检测）→ 步数封顶
+    counter = {"n": 0}
+
+    def varying(m, t, **kw):
+        counter["n"] += 1
+        return {"content": "", "tool_calls": [
+            {"name": "search", "arguments": {"query": f"营收{counter['n']}"}}]}
+
+    monkeypatch.setattr(llmx, "chat_with_tools", varying)
+    st2 = agent(new_state("欧科亿一季度营收", "llm"))
+    assert any("6步" in t for t in st2["trace"])          # 硬上限
+    assert any("/budget" in t for t in st2["trace"])
+
+    # 场景 3：工具层故障 → 回退固定管线
+    def boom(m, t, **kw):
+        raise RuntimeError("tools down")
+    monkeypatch.setattr(llmx, "chat_with_tools", boom)
+    st3 = agent(new_state("欧科亿一季度营收", "llm"))
+    assert st3["hits"]                                       # 回退检索仍有证据
+    assert any("agent:fallback" in t for t in st3["trace"])
+
+    # 场景 4：小模型死循环（同一调用原样重复）→ 重复检测提前收手
+    repeat = {"content": "", "tool_calls": [
+        {"name": "search", "arguments": {"query": "营收", "company": "欧科亿"}}]}
+    monkeypatch.setattr(llmx, "chat_with_tools", lambda m, t, **kw: repeat)
+    st4 = agent(new_state("欧科亿一季度营收", "llm"))
+    assert st4["hits"]                                       # 首轮证据保留
+    assert any("重复收手" in t for t in st4["trace"])
+    assert not any("6步" in t for t in st4["trace"])         # 没烧满预算
+
+    # 场景 5：多家证据按文档轮转输出——单方信息密度高不能挤掉另一方
+    # （decompose 交错合并的同款教训，pool 也适用）
+    seq = iter([
+        {"content": "", "tool_calls": [
+            {"name": "search", "arguments": {"query": "营收", "company": "欧科亿"}}]},
+        {"content": "", "tool_calls": [
+            {"name": "search", "arguments": {"query": "营收", "company": "海伦哲"}}]},
+        {"content": "够了", "tool_calls": []},
+    ])
+    monkeypatch.setattr(llmx, "chat_with_tools", lambda m, t, **kw: next(seq))
+    st5 = agent(new_state("对比欧科亿和海伦哲营收", "llm"))
+    docs_order = [h.chunk.doc_id for h in st5["hits"][:4]]
+    assert docs_order[0] != docs_order[1]                    # 前两块来自不同公司
+
+    # 场景 6：模型不传 company/period → 从 understanding 继承（小模型
+    # 单跳题实测不传参，全库检索被淹没）
+    no_comp = iter([
+        {"content": "", "tool_calls": [
+            {"name": "search", "arguments": {"query": "预计净利润"}}]},
+        {"content": "够", "tool_calls": []},
+    ])
+    monkeypatch.setattr(llmx, "chat_with_tools", lambda m, t, **kw: next(no_comp))
+    st6 = agent({**new_state("欧科亿 2026 一季度预计净利润", "llm"),
+                 "understanding": {"intent": "metric", "companies": ["欧科亿"],
+                                   "period": "Q1", "reason": "r"}})
+    assert st6["hits"]
+    assert all(h.chunk.doc_id == "欧科亿_2026Q1" for h in st6["hits"])
+
+    # 场景 7：工具参数与理解冲突时以理解为准——0.8b 实测把「半年度」
+    # 幻觉成 FY 传参，显式错误参数覆盖先验后年报块洪水
+    wrong_p = iter([
+        {"content": "", "tool_calls": [
+            {"name": "search", "arguments": {"query": "净利润",
+                                             "period": "FY"}}]},   # 错误参数
+        {"content": "够", "tool_calls": []},
+    ])
+    monkeypatch.setattr(llmx, "chat_with_tools", lambda m, t, **kw: next(wrong_p))
+    st7 = agent({**new_state("欧科亿 2026 一季度预计净利润", "llm"),
+                 "understanding": {"intent": "metric", "companies": ["欧科亿"],
+                                   "period": "Q1", "reason": "r"}})
+    assert all(h.chunk.doc_id == "欧科亿_2026Q1" for h in st7["hits"])
+
+
+def test_understand_period_backfill_from_rule(app, monkeypatch):
+    """小模型抽 period 时灵时不灵（实测空串→检索不限期间→年报块淹没）：
+    空值时从规则确定性匹配回填——与公司名纠偏对称。"""
+    from duizhang import llm as llmx
+    from duizhang.graph import make_nodes
+    understand = make_nodes(_MiniCorpus())[0]
+    monkeypatch.setattr(llmx, "llm_enabled", lambda: True)
+    monkeypatch.setattr(llmx, "chat_json", lambda s, u, **kw: {
+        "intent": "metric", "companies": ["欧科亿"], "period": "", "reason": "r"})
+    st = understand(new_state("欧科亿 2026 年半年度预计净利润多少", "llm"))
+    assert st["understanding"]["period"] == "H1"      # 规则回填
+
+
 # ── 图行为 ──────────────────────────────────────────────
 
 

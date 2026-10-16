@@ -31,6 +31,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 from langgraph.graph import END, START, StateGraph
@@ -44,6 +45,19 @@ from duizhang.schemas import GraphState
 MAX_RETRIES = 1
 TOP_K = 8
 GRADE_THRESHOLD = 1.5   # 命中块与 query 的平均 token 重叠下限
+MAX_AGENT_STEPS = 6     # Agent 环步数硬上限（防失控；业界惯例）
+
+# 唯一工具：检索（对比类问题模型自己逐家调）——刻意不建工具注册表，
+# 一个 search 已覆盖 metric/compare 的真实需要（防过度设计）。
+_SEARCH_TOOL = {"type": "function", "function": {
+    "name": "search",
+    "description": "在财报语料中检索证据块，返回 [{doc,page,text}] 列表。"
+                   "对比多家公司时逐家调用（company 参数）；期间用 H1/Q1/Q3/FY。",
+    "parameters": {"type": "object", "properties": {
+        "query": {"type": "string", "description": "检索词（指标术语，如：营业收入 同比）"},
+        "company": {"type": "string", "description": "公司名，可选"},
+        "period": {"type": "string", "description": "期间 H1/Q1/Q3/FY，可选"}},
+        "required": ["query"]}}}
 
 # 意图关键词（route 与 rule_understand 共用；摘要词优先，防止
 # 「总结业绩预告」被「预告」劫持到 metric）
@@ -154,12 +168,21 @@ def make_nodes(corpus: Corpus):
         if u is None:
             u = rule_understand(q, corpus)
         else:
+            # 意图守卫：小模型会把「哪家赚得多」判成合法枚举 metric——
+            # 公司≥2 且 query 含对比词时强制 compare（多跳分解的前提）
+            if (u.get("intent") == "metric" and len(u.get("companies") or []) >= 2
+                    and any(w in q for w in _COMPARE_WORDS)):
+                u["intent"] = "compare"
             # 公司名纠偏：LLM 幻觉出语料外的公司时，用规则命中的兜底
             known = {d.company for d in corpus.docs.values() if d.company}
+            rule_u = rule_understand(q, corpus)
             if not set(u["companies"]) <= known:
-                rule_hits = rule_understand(q, corpus)["companies"]
-                if rule_hits:
-                    u["companies"] = rule_hits
+                if rule_u["companies"]:
+                    u["companies"] = rule_u["companies"]
+            # period 回填：小模型抽期间时灵时不灵（空串→检索不限期间→
+            # 年报块淹没，实测）——空值时用规则的确定性匹配
+            if not u["period"] and rule_u["period"]:
+                u["period"] = rule_u["period"]
         return {**state, "understanding": u, "trace": trace}
 
     def route(state: GraphState) -> GraphState:
@@ -364,6 +387,122 @@ def make_nodes(corpus: Corpus):
                 "answer": "原文中没有找到依据。换个问法，或先 ingest 对应报告。",
                 "citations": [], "verdict": "refused", "trace": ["refuse"]}
 
+    def agent_research(state: GraphState) -> GraphState:
+        """真 Agent 环（v0.6）：模型在循环里自主决定检索什么、何时收手——
+        单一 search 工具（公司/期间参数），步数硬上限。工具层故障或
+        零证据时回退固定检索管线（不空手）。出口仍走 generate→verify，
+        **自主检索不豁免对账闸门**。heuristic 模式不进此节点。"""
+        pool: dict[str, object] = {}
+        u = state.get("understanding") or {}
+
+        def run_search(args: dict) -> str:
+            q = str(args.get("query", "")).strip()
+            # 工具默认值从 understanding 继承（廉价结构化抽取做先验，
+            # 模型显式传参可覆盖）——小模型单跳题常不传 company，
+            # 全库检索会被千家同类内容淹没（实测 top1 全是无关公司）
+            u_comps = [c for c in (u.get("companies") or []) if c]
+            comp = str(args.get("company", "") or "") or \
+                (u_comps[0] if len(u_comps) == 1 else "")
+            # 期间以理解为准、参数只补空白：理解是模型对原问题的结构化
+            # 决定（含规则回填），工具参数是检索战术——0.8b 实测会把
+            # 「半年度」幻觉成 FY，显式错误参数覆盖先验后年报块洪水
+            raw_p = str(args.get("period", "") or "")
+            ph = period_hints(raw_p)
+            period = u.get("period") or (ph[0] if ph else "")
+            if not q:
+                return "[]"
+            if q not in agent_queries:
+                agent_queries.append(q)
+            # 多公司 understanding 且模型没指定公司 → 逐家检索交错合并
+            # （对比题的正确语义；单公司才继承为默认过滤）
+            targets = [comp] if comp else (u_comps or [""])
+            scope_common = {d for d, doc in corpus.docs.items()
+                            if not period or period in doc.period} or None
+            per: dict[str, list] = {}
+            for c in targets:
+                scope = ({d for d in scope_common
+                          if corpus.docs[d].company == c}
+                         if c and scope_common is not None else scope_common)
+                for h in corpus.search(expand_query(q), k=8, doc_filter=c,
+                                       doc_scope=scope):
+                    per.setdefault(c, [])
+                    if h.chunk.chunk_id not in pool:
+                        pool[h.chunk.chunk_id] = h
+                        per[c].append(h)
+            merged = [h for i in range(8) for lst in per.values()
+                      if i < len(lst) for h in [lst[i]]]
+            return json.dumps([{"doc": h.chunk.doc_id, "page": h.chunk.page,
+                                "text": h.chunk.text[:160]} for h in merged],
+                              ensure_ascii=False)
+
+        n_steps = n_calls = 0
+        agent_queries: list[str] = []  # Agent 实际用的检索词（写进
+        # effective_query：证据是靠这些词找到的，下游抽取式/verify 打分
+        # 必须与之一致——原始口语 query 与证据零重叠会误拒，实测）
+        seen: dict[str, str] = {}      # 幂等缓存：小模型会把同一调用原样重复 6 步（实测）
+        stopped = "budget"
+        try:
+            msgs = [
+                {"role": "system", "content":
+                    "你是财报研究 agent。用 search 工具检索证据；对比类问题"
+                    "逐家公司检索；证据足够回答后停止调用工具并简述结论。"
+                    "每次检索换不同角度（换指标词/换公司/换期间），不重复。"
+                    "对比结论必须与所引数字的大小关系一致。"},
+                {"role": "user", "content": state["query"]},
+            ]
+            for _ in range(MAX_AGENT_STEPS):
+                resp = llmx.chat_with_tools(msgs, [_SEARCH_TOOL])
+                n_steps += 1
+                if not resp["tool_calls"]:
+                    stopped = "self"
+                    break
+                msgs.append({"role": "assistant", "content": resp["content"],
+                             "tool_calls": [{"function": {
+                                 "name": tc["name"], "arguments": tc["arguments"]}}
+                                 for tc in resp["tool_calls"]]})
+                fresh = False
+                for tc in resp["tool_calls"]:
+                    key = json.dumps(tc["arguments"], sort_keys=True,
+                                     ensure_ascii=False)
+                    if key in seen:      # 重复调用：回缓存结果并提示换角度
+                        msgs.append({"role": "tool",
+                                     "content": seen[key] + "（重复检索：结果同上。"
+                                                "请换检索角度或停止调用工具。）"})
+                        continue
+                    fresh = True
+                    n_calls += 1
+                    obs = run_search(tc["arguments"]) if tc["name"] == "search" \
+                        else "[]"
+                    seen[key] = obs
+                    msgs.append({"role": "tool", "content": obs})
+                if not fresh and pool:   # 整批全是重复 = 模型没有新问题要问
+                    stopped = "重复收手"
+                    break
+        except Exception:
+            n_steps = -1
+        if not pool:   # 工具层故障/模型没找到证据 → 固定管线兜底
+            u = state.get("understanding") or rule_understand(state["query"], corpus)
+            base = decompose(state) if u.get("intent") == "compare" else retrieve(state)
+            return {**base, "trace": ["agent:fallback"] + base["trace"]}
+        # 证据按文档轮转输出：单方信息密度高不能挤掉另一方的证据
+        # （decompose 交错合并的同款教训，pool 插入序会让先查的一方包揽前排）
+        by_doc: dict[str, list] = {}
+        for h in pool.values():
+            by_doc.setdefault(h.chunk.doc_id, []).append(h)
+        hits_out: list = []
+        r = 0
+        while len(hits_out) < TOP_K and any(len(v) > r for v in by_doc.values()):
+            for chunks in by_doc.values():
+                if r < len(chunks) and len(hits_out) < TOP_K:
+                    hits_out.append(chunks[r])
+            r += 1
+        eff = state.get("effective_query", state["query"])
+        for q in agent_queries:
+            if q not in eff:
+                eff = f"{eff} {q}"
+        return {**state, "hits": hits_out, "effective_query": eff,
+                "trace": [f"agent:{n_steps}步/{n_calls}次search/{len(pool)}块证据/{stopped}"]}
+
     def verify_citations(state: GraphState) -> GraphState:
         a = state.get("answer", "")
         verdict, cov = ans.verify(a, state.get("hits", []))
@@ -379,14 +518,14 @@ def make_nodes(corpus: Corpus):
         return refuse({**state, "trace": [f"verify:degraded({cov})→refuse"]})
 
     return (understand, route, retrieve, grade_docs, rewrite_query, generate,
-            decompose, summarize_doc, refuse, verify_citations)
+            decompose, summarize_doc, refuse, verify_citations, agent_research)
 
 
 # ── 条件边 ──────────────────────────────────────────────
 
 
 def build_graph(corpus: Corpus):
-    understand, route, retrieve, grade, rewrite, generate, decompose, summarize, refuse, verify = make_nodes(corpus)
+    understand, route, retrieve, grade, rewrite, generate, decompose, summarize, refuse, verify, agent = make_nodes(corpus)
 
     g = StateGraph(GraphState)
 
@@ -400,12 +539,17 @@ def build_graph(corpus: Corpus):
     g.add_node("summarize_doc", summarize)
     g.add_node("refuse", refuse)
     g.add_node("verify_citations", verify)
+    g.add_node("agent_research", agent)
 
     g.add_edge(START, "understand")
     g.add_edge("understand", "route")
 
     def after_route(state: GraphState) -> str:
         r = state.get("route", "metric")
+        # v0.6：llm 模式下 metric/compare 进 Agent 环（模型自主检索）；
+        # heuristic 模式走固定管线（兜底 + 回归基线）
+        if state.get("mode") == "llm" and r in ("metric", "compare"):
+            return "agent_research"
         return {"metric": "retrieve", "summary": "summarize_doc",
                 "compare": "decompose", "other": "refuse"}[r]
 
@@ -413,6 +557,7 @@ def build_graph(corpus: Corpus):
                             {"retrieve": "retrieve",
                              "summarize_doc": "summarize_doc",
                              "decompose": "decompose",
+                             "agent_research": "agent_research",
                              "refuse": "refuse"})
 
     g.add_edge("retrieve", "grade_docs")
@@ -431,6 +576,7 @@ def build_graph(corpus: Corpus):
                              "refuse": "refuse"})
 
     g.add_edge("rewrite_query", "retrieve")     # 纠错环：改写后重检索
+    g.add_edge("agent_research", "generate")    # Agent 环收集证据后直接生成
     g.add_edge("generate", "verify_citations")
     g.add_edge("summarize_doc", END)
     g.add_edge("refuse", END)
