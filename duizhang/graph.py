@@ -1,32 +1,34 @@
 """LangGraph 图：对账的编排心脏。
 
             ┌─────────┐
-            │  route  │ 指标/摘要/其它
+            │understand│ LLM 结构化理解（意图/公司/期间），规则兜底
             └────┬────┘
-      ┌──────────┼──────────────┐
-   metric     summary         other
-      │          │              │
-      ▼          ▼              ▼
-  retrieve   summarize_doc    refuse
-      │                        （无据/闲聊，礼貌拒答）
-      ▼
-  grade_docs ──insufficient & retries<1──▶ rewrite_query ─┐
-      │ sufficient                          （改写后重检索）│
-      ▼                                     ◀─────────────┘
-  generate（heuristic 抽取式 / llm grounded 生成）
-      │
-      ▼
-  verify_citations ──fail──▶ extractive 降级 ─┐
-      │ pass                                  │
-      ▼                                       ▼
-     END                                     END
+            ┌────▼────┐
+            │  route  │ 纯函数分发 + 期间守卫
+            └────┬────┘
+      ┌──────────┼────────────────┐
+   metric/compare│             summary/other
+   （llm）       │（heuristic）      │
+      ▼          ▼                  ▼
+ agent_research  retrieve/decompose summarize_doc / refuse
+ （工具循环，模型 ──▶ grade_docs ─┐
+  自主检索，步数≤6）  ─insufficient & retries<1──▶ rewrite_query ─┐
+      │             │ sufficient                   （改写后重检索）│
+      │             ▼                              ◀─────────────┘
+      └──────▶ generate（llm grounded / heuristic 抽取式）
+                 │
+                 ▼
+      verify_citations ──fail──▶ 抽取式降级/拒答 ─┐
+                 │ pass                            │
+                 ▼                                 ▼
+                END                               END
 
 设计要点（为什么是这张图）：
-· Corrective-RAG 纠错环：grade→rewrite→retrieve 的有界重试（≤1），
-  用条件边实现；无界重试是状态机的反模式。
+· v0.6 真 Agent 环：llm 模式下 metric/compare 的检索交给模型（单一
+  search 工具 + 循环，模型决定查什么/何时收手）；heuristic 固定管线
+  （含 grade→rewrite 有界纠错环 ≤1）保留为零 key 兜底与回归基线。
 · 每个节点窄接口：只读需要的字段、只写负责的字段（见 GraphState 注释）。
-· heuristic 与 llm 双模式走同一张图：把「换模型」从架构变更
-  降级为节点实现的替换。
+· 两条路径殊途同归于 generate→verify_citations：自主检索不豁免对账闸门。
 """
 
 from __future__ import annotations
@@ -243,39 +245,18 @@ def make_nodes(corpus: Corpus):
             rel.append(len(q & ht))
         score = max(rel) if rel else 0.0
         sufficient = score >= GRADE_THRESHOLD
-        fallback: list[str] = []
-        if state["mode"] == "llm" and llmx.llm_enabled():
-            try:
-                r = llmx.chat_json(
-                    "你是检索质量评审。判断命中片段是否包含与 query 相关的财报信息、"
-                    "足以支撑回答——相关即可，不要求答案完整出现在片段里；"
-                    "拿不准时 sufficient=true。返回 JSON："
-                    '{"sufficient":true/false,"reason":"一句话"}',
-                    f"query: {state['query']}\n\n片段：\n"
-                    + "\n---\n".join(h.chunk.text[:400] for h in state["hits"][:4]))
-                sufficient = bool(r.get("sufficient", sufficient))
-            except Exception:
-                fallback = ["grade:llm→fallback"]
+        # v0.6 起 llm 模式经 agent_research 直连 generate，本节点仅
+        # heuristic 固定管线可达——检索质量的 LLM 评审由 Agent 环的
+        # 「自主决定何时收手」承担，此处的 LLM 分支已删（死代码清理）
         return {**state, "relevance": round(score, 2), "sufficient": sufficient,
-                "trace": fallback + [f"grade:{score:.1f} {'ok' if sufficient else 'insufficient'}"]}
+                "trace": [f"grade:{score:.1f} {'ok' if sufficient else 'insufficient'}"]}
 
     def rewrite_query(state: GraphState) -> GraphState:
-        base = state["query"]
-        fallback: list[str] = []
-        if state["mode"] == "llm" and llmx.llm_enabled():
-            try:
-                r = llmx.chat_json(
-                    "改写检索 query 使其更贴近财报术语，保留原意。返回 JSON："
-                    '{"query":"改写后的 query"}', base)
-                base = r.get("query", base) or base
-            except Exception:
-                fallback = ["rewrite:llm→fallback"]
-                base = expand_query(base) + " 预计 营业收入 净利润"
-        else:
-            base = f"{expand_query(base)} 预计 营业收入 净利润 同比"
+        # 同 grade_docs：v0.6 后仅 heuristic 可达，改写的 LLM 分支已删
+        base = f"{expand_query(state['query'])} 预计 营业收入 净利润 同比"
         return {**state, "effective_query": base, "rewritten": True,
                 "retries": state.get("retries", 0) + 1,
-                "trace": fallback + ["rewrite"]}
+                "trace": ["rewrite"]}
 
     def decompose(state: GraphState) -> GraphState:
         """compare 多跳分解（v0.5）：按公司拆子查询、各自公司+期间

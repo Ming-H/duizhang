@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
 ALLOWED_SUFFIXES = {".pdf", ".md", ".txt"}
@@ -27,17 +26,6 @@ def scan(root: str | Path, exclude: set[str] = DEFAULT_EXCLUDE) -> dict[str, str
         st = p.stat()
         out[str(p)] = f"{st.st_mtime_ns}-{st.st_size}"
     return out
-
-
-def load_manifest(db_path: str | Path) -> dict[str, str]:
-    con = sqlite3.connect(str(db_path))
-    try:
-        rows = con.execute("SELECT path, fingerprint FROM manifest").fetchall()
-        return dict(rows)
-    except sqlite3.OperationalError:      # 表还没建
-        return {}
-    finally:
-        con.close()
 
 
 def diff(manifest: dict[str, str], scanned: dict[str, str]):
