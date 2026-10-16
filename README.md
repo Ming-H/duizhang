@@ -29,8 +29,13 @@ python -m duizhang.cli eval                # 内置评估集，一条命令复�
 
 ```bash
 cat > .env <<'EOF'
-DZ_LLM_API_KEY=你的key          # 智谱 https://open.bigmodel.cn 的 API key
-DZ_LLM_MODEL=glm-4.5-flash      # 免费档开箱可用；充值后改 glm-4.6
+# 方式 A：GLM Coding Plan（Anthropic 兼容端点，订阅配额内零额外费用）
+DZ_LLM_API_KEY=你的coding plan token
+DZ_LLM_BASE_URL=https://open.bigmodel.cn/api/anthropic
+DZ_LLM_MODEL=glm-5.3
+# 方式 B：v4 免费档——注释掉上面三行，改用：
+# DZ_LLM_API_KEY=你的key
+# DZ_LLM_MODEL=glm-4.5-flash
 EOF
 python -m duizhang.cli ask "对比欧科亿和海伦哲 2026 一季度谁赚得多"   # 多跳对比
 python -m duizhang.cli eval --mode llm --dataset agent
@@ -81,22 +86,23 @@ START → understand ──→ route ──metric──→ retrieve → grade_do
   容量推导与备选取舍见 `docs/DESIGN-scale.md`、讲解见 `docs/EXPLAINER.md`。
 - **评估内建**：改任何代码，`python -m duizhang.cli eval` 验证三指标不退化。
 
-## 评估（全量语料 1,104 docs / 60.7 万块，glm-4.5-flash）
+## 评估（全量语料 1,104 docs / 60.7 万块）
 
 | 数据集 | 模式 | retrieval@3 | answer hit | refusal |
 |---|---|---|---|---|
 | default（10 题，CI 回归） | heuristic | 1.00 | 1.00 | 1.00 |
-| default | llm | 1.00 | 0.75–0.875* | 1.00 |
+| default | llm（glm-5.3） | 1.00 | 0.875 | 1.00 |
 | agent（3 对比 + 3 单跳/摘要 + 2 陷阱） | heuristic | 1.00 | 1.00 | 1.00 |
-| agent | **llm** | **1.00** | **1.00** | **1.00** |
+| agent | **llm（glm-5.3）** | **1.00** | **1.00** | **1.00** |
 
-\* 生成方差（temperature 0.2，free 档模型），如实记录；heuristic 模式
-可复现无方差。陷阱题两类：未来期间（2030）与领域外（天气）——都必须拒答。
+glm-5.3 走 GLM Coding Plan（Anthropic 兼容端点，Claude Code 同款通道，
+订阅配额内零额外费用）；glm-4.5-flash 走 v4 免费档（default 集方差
+0.75–0.875，如实记录）；heuristic 模式可复现无方差。陷阱题两类：未来期间（2030）与领域外（天气）——都必须拒答。
 多跳对比题示例：`对比欧科亿和海伦哲 2026 一季度谁赚得多` → 分解检索两家
 Q1 净利润证据 → 对比作答。历史修复记录见 `docs/DESIGN-v0.4.md` §5、
 `docs/DESIGN-v0.5.md`。
 
-单元测试（46 用例：分块/理解/守卫/纠错环/分解/Store 幽灵块/多根摄取/
+单元测试（49 用例：分块/理解/守卫/纠错环/分解/Store 幽灵块/多根摄取/
 对账口径/思考分层/.env，conftest 封网永不外呼）：
 
 ```bash
@@ -126,7 +132,7 @@ duizhang/
 ├── llm.py          # LLM 层：智谱 GLM 默认，.env 装载，思考分层，任意兼容端点可换
 ├── evalx.py        # 评估 runner（default/agent 双数据集）
 └── cli.py          # ingest / index / ask / eval / docs
-tests/              # 46 用例（conftest 封网：永不外呼 LLM）
+tests/              # 49 用例（conftest 封网：永不外呼 LLM）
 evals/              # dataset.json（10 题）+ dataset-agent.json（8 题含多跳对比）
 samples/            # 3 家公司 5 份真实财报（巨潮）
 docs/               # 设计文档 ×4 + EXPLAINER 讲解 + 流程动效图

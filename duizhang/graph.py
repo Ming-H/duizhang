@@ -120,11 +120,21 @@ def make_nodes(corpus: Corpus):
                     "规则：companies 原样取自问题中的公司名（没有则空数组）；"
                     "period 按财报日历（一季度/一季报/Q1→Q1，半年度/中报/二季度→H1，"
                     "三季→Q3，年度/年报/四季度→FY，未提及则空串）；"
-                    "intent：metric=问具体数字/指标/事实，summary=要概览/总结/分析，"
-                    "compare=对比多家公司，other=闲聊或超纲。", q)
+                    "intent：metric=问具体数字/指标/事实/原因/归因（需要检索证据句），"
+                    "summary=要整体概览/总结全篇，compare=对比多家公司，"
+                    "other=闲聊或超纲。注意「XX变动的原因」是 metric 不是 summary。", q)
                 intent = r.get("intent", "metric")
                 if intent not in ("metric", "summary", "compare", "other"):
-                    intent = "metric"
+                    # 宽松归一：常思模型偶尔回中文意图（glm-5.3 实测
+                    # 「对比营收」）——按语义归类，不能一律掉到 metric
+                    raw_intent = str(intent)
+                    if (len(r.get("companies", [])) >= 2
+                            and any(w in raw_intent for w in ("对比", "比较", "compare", "vs", "VS"))):
+                        intent = "compare"
+                    elif any(w in raw_intent for w in ("总结", "摘要", "概览")):
+                        intent = "summary"
+                    else:
+                        intent = "metric"   # 「变动的原因」等归因题走 metric（检索证据句）
                 raw_period = str(r.get("period", ""))
                 if raw_period in ("H1", "Q1", "Q3", "FY"):
                     period = raw_period

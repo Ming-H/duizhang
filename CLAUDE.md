@@ -23,14 +23,14 @@ python -m duizhang.cli docs             # list ingested docs
 python -m duizhang.cli index            # (re)build FTS for existing chunks
 
 # Tests / lint
-pytest                                  # 46 cases; conftest blocks all real LLM calls
+pytest                                  # 49 cases; conftest blocks all real LLM calls
 pytest tests/test_store.py::test_readd_after_drop_no_ghost   # one test
 ruff check .                            # lint (CI enforces)
 ```
 
 After changing retrieval/graph/answer code, run `python -m duizhang.cli eval` (heuristic) and verify the three metrics don't regress (full corpus: 1.00/1.00/1.00). Bug fixes follow TDD — failing test first, watch it fail, then fix (DESIGN-v0.4.md §5 and DESIGN-v0.5.md record two such rounds).
 
-Secrets: `DZ_LLM_API_KEY` lives ONLY in `.env` (gitignored; `_load_dotenv` loads it, env vars take precedence). Never write the key into code, docs, sample commands, or git history. Other env: `DZ_DB` (default `duizhang.db`, a 752MB gitignored local corpus), `DZ_LLM_BASE_URL`/`DZ_LLM_MODEL` (any OpenAI-compatible endpoint), `DZ_LLM_MAX_TOKENS`, `DZ_LLM_THINKING` (`auto`/`enabled`/`disabled` — auto = thinking off for structured calls, on for generation).
+Secrets: `DZ_LLM_API_KEY` lives ONLY in `.env` (gitignored; `_load_dotenv` loads it, env vars take precedence). Never write the key into code, docs, sample commands, or git history. Two provider channels: v4 pay-per-use (`/api/paas/v4`, default glm-4.5-flash free tier) and GLM Coding Plan (`/api/anthropic` — plan quota is ONLY valid there; `llm._use_anthropic()` auto-switches protocol; glm-5.3 always thinks and thinking counts toward max_tokens, so the anthropic path multiplies the budget ×8). Other env: `DZ_DB`, `DZ_LLM_MODEL`, `DZ_LLM_MAX_TOKENS`, `DZ_LLM_THINKING`.
 
 ## Architecture
 

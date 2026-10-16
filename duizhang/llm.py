@@ -45,13 +45,43 @@ def llm_enabled() -> bool:
     return bool(os.environ.get("DZ_LLM_API_KEY"))
 
 
+def _base_url() -> str:
+    return os.environ.get("DZ_LLM_BASE_URL", DEFAULT_BASE_URL)
+
+
+def _use_anthropic() -> bool:
+    """GLM Coding Plan 的配额只在 Anthropic 兼容端点（…/api/anthropic）
+    有效——v4 按量端点会报余额不足（实测）。base_url 指向该端点时走
+    Anthropic Messages 协议（Claude Code 同款通道）。"""
+    return "/api/anthropic" in _base_url()
+
+
 @lru_cache(maxsize=1)
 def _client():
     from openai import OpenAI  # 延迟导入：heuristic 模式不要求安装 openai
     return OpenAI(
         api_key=os.environ["DZ_LLM_API_KEY"],
-        base_url=os.environ.get("DZ_LLM_BASE_URL", DEFAULT_BASE_URL),
+        base_url=_base_url(),
     )
+
+
+@lru_cache(maxsize=1)
+def _client_anthropic():
+    from anthropic import Anthropic  # 延迟导入：仅 Coding Plan 端点需要
+    return Anthropic(api_key=os.environ["DZ_LLM_API_KEY"], base_url=_base_url())
+
+
+def _anthropic_text(system: str, user: str, max_tokens: int) -> str:
+    """Anthropic Messages 协议单轮调用（glm-5.3 等常思模型走此通道）。
+    注意：新版 SDK 无 temperature 参数；thinking 默认开启且计入
+    max_tokens——512 的默认预算会被思考吃光导致正文为空（实测），
+    此通道预算至少 ×8。"""
+    r = _client_anthropic().messages.create(
+        model=os.environ.get("DZ_LLM_MODEL", DEFAULT_MODEL),
+        max_tokens=_max_tokens(max_tokens * 8 if not os.environ.get("DZ_LLM_MAX_TOKENS") else max_tokens),
+        system=system,
+        messages=[{"role": "user", "content": user}])
+    return "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
 
 
 def _max_tokens(default: int) -> int:
@@ -112,9 +142,10 @@ def _parse_json(raw: str) -> dict:
 
 def chat_json(system: str, user: str, max_tokens: int = 512) -> dict:
     """要求 JSON 输出的单轮调用；解析失败抛 ValueError 由调用节点降级。"""
-    model = os.environ.get("DZ_LLM_MODEL", DEFAULT_MODEL)
+    if _use_anthropic():
+        return _parse_json(_anthropic_text(system, user, max_tokens))
     resp = _client().chat.completions.create(
-        model=model,
+        model=os.environ.get("DZ_LLM_MODEL", DEFAULT_MODEL),
         messages=[{"role": "system", "content": system},
                   {"role": "user", "content": user}],
         temperature=0,
@@ -125,9 +156,10 @@ def chat_json(system: str, user: str, max_tokens: int = 512) -> dict:
 
 
 def chat_text(system: str, user: str, max_tokens: int = 800) -> str:
-    model = os.environ.get("DZ_LLM_MODEL", DEFAULT_MODEL)
+    if _use_anthropic():
+        return _anthropic_text(system, user, max_tokens)
     resp = _client().chat.completions.create(
-        model=model,
+        model=os.environ.get("DZ_LLM_MODEL", DEFAULT_MODEL),
         messages=[{"role": "system", "content": system},
                   {"role": "user", "content": user}],
         temperature=0.2,

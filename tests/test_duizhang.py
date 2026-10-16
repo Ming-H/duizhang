@@ -220,6 +220,20 @@ def test_understand_node_llm_and_fallback(app, monkeypatch):
     assert any("understand:llm→fallback" in t for t in st2["trace"])
 
 
+def test_understand_normalizes_loose_intent(app, monkeypatch):
+    """常思模型偶尔回中文意图（glm-5.3 实测「对比营收」）——含对比
+    语义且多公司时归一为 compare，不能一律掉到 metric。"""
+    from duizhang import llm as llmx
+    from duizhang.graph import make_nodes
+    understand = make_nodes(_MiniCorpus())[0]
+    monkeypatch.setattr(llmx, "llm_enabled", lambda: True)
+    monkeypatch.setattr(llmx, "chat_json", lambda s, u, **kw: {
+        "intent": "对比营收", "companies": ["欧科亿", "海伦哲"],
+        "period": "Q1", "reason": "对比两家"})
+    st = understand(new_state("对比欧科亿和海伦哲 2026 一季报营收", "llm"))
+    assert st["understanding"]["intent"] == "compare"
+
+
 def test_route_consumes_understanding():
     """route 纯函数化：消费 understand 的 intent 分发（不再自己调
     LLM/关键词），compare 意图透传；无 understanding 时规则兜底。"""

@@ -60,6 +60,44 @@ def test_chat_kwargs_thinking_gating(monkeypatch):
     assert "extra_body" not in llm._chat_kwargs(512)
 
 
+def test_anthropic_protocol_detection_and_dispatch(monkeypatch):
+    """Coding Plan 配额只在 Anthropic 兼容端点有效（v4 按量端点报余额
+    不足）——base_url 含 /api/anthropic 时走 Anthropic 协议，密钥/
+    模型/JSON 容错语义不变。"""
+
+    class _Block:
+        type = "text"
+
+        def __init__(self, text):
+            self.text = text
+
+    class _Resp:
+        content = [_Block('```json\n{"ok": true}\n```')]
+
+    class _FakeAnthropic:
+        def __init__(self):
+            self.calls = []
+
+        class messages:
+            @staticmethod
+            def create(**kw):
+                return _Resp()
+
+    monkeypatch.delenv("DZ_LLM_BASE_URL", raising=False)
+    monkeypatch.setattr(llm, "_use_anthropic", lambda: True)
+    fa = _FakeAnthropic()
+    monkeypatch.setattr(llm, "_client_anthropic", lambda: fa)
+    assert llm.chat_json("sys", "user") == {"ok": True}   # 围栏 JSON 也解析
+    assert llm.chat_text("sys", "user").strip().startswith("```")
+
+
+def test_base_url_detection(monkeypatch):
+    monkeypatch.setenv("DZ_LLM_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
+    assert llm._use_anthropic() is True
+    monkeypatch.setenv("DZ_LLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/")
+    assert llm._use_anthropic() is False
+
+
 def test_auto_mode_resolution(monkeypatch):
     """mode=auto：有 key 走 llm（LLM 是大脑），无 key 走 heuristic（兜底），
     trace 记录解析结果；显式模式原样通过。"""

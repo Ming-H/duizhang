@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| 状态 | **已实施并真机验收**（2026-10-16，glm-4.5-flash） |
+| 状态 | **已实施并真机验收**（2026-10-16，glm-4.5-flash 与 glm-5.3@Coding Plan 双通道） |
 | 范围 | LLM 升级为默认大脑：查询理解节点 + 对比分解节点 + 智谱 provider；对账闸门保持确定性 |
 | 前置文档 | `DESIGN-v0.4.md`（FTS5 检索层与 Store 收敛，含 §5 第四轮审查） |
 | 实施计划 | `docs/plans/2026-10-16-agentic-rag-v0.5.md` |
@@ -56,9 +56,12 @@ LLM 再主导，出口仍是确定性 `verify_citations`。本轮真机联调对
 `DZ_LLM_THINKING=disabled|enabled` 可整体覆盖。仅智谱端点发送该
 扩展参数（deepseek 等兼容端点不认识，绝不附加）。
 
-### D5 provider 与密钥
-默认智谱 `open.bigmodel.cn/api/paas/v4` + `glm-4.5-flash`（免费档
-开箱可用；充值后 `.env` 改 `glm-4.6` 即提质，代码不动）。密钥只进
+### D5 provider 与密钥：双通道
+- **v4 按量端点**（`/api/paas/v4`）：默认 `glm-4.5-flash` 免费档开箱可用；
+- **Anthropic 兼容端点**（`/api/anthropic`，实测追加）：GLM Coding Plan
+  配额**只在此端点有效**（v4 端点报余额不足）——`_use_anthropic()` 按
+  base_url 自动切换协议，glm-5.3 常思模型走此通道；思考 token 计入
+  max_tokens，预算 ×8（512 会被思考吃光导致正文为空，实测）。密钥只进
 `.env`（gitignored），`_load_dotenv` 装载且环境变量优先；测试套件
 经 conftest 全局封网（永不外呼）。**备选与否决**：密钥进代码/配置
 模板（泄漏风险）；python-dotenv 依赖（12 行手写够用）。
@@ -76,8 +79,10 @@ default 集（10 题，CI 回归）不变；agent 集（8 题：3 对比 + 3 单
 | default | llm（flash） | 1.00 | 0.75–0.875（方差） | 1.00 |
 | agent | heuristic | 1.00 | 1.00 | 1.00 |
 | agent | llm（flash） | **1.00** | **1.00** | **1.00** |
+| default | llm（glm-5.3@Coding Plan） | 1.00 | 0.875 | 1.00 |
+| agent | llm（glm-5.3@Coding Plan） | **1.00** | **1.00** | **1.00** |
 
-单测 46 用例（新增 understand/decompose/expect_docs/思考分层/.env/
+单测 49 用例（新增 understand/decompose/expect_docs/思考分层/.env/
 coverage 口径六组）；ruff 全绿；conftest 封网。
 
 ## 4. 遗留与后续
