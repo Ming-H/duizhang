@@ -103,17 +103,40 @@ def citation_coverage(answer: str, hits: list[Retrieved]) -> float:
     可识别引用时回退 hits[:4]（LLM 生成路径只看过前 4 块）。
     抽取式从 hits[:8] 抽句（答案块常在第 4 名开外），第 5–8 名块支撑
     的句子若不计入证据池，自家答案会被自家 verify 误判 degraded。
+
+    两侧 token 均经 _content_tokens（公司名/年份/期间元词不计）——
+    与 extractive 打分同一口径：答案说「欧科亿 2026 年」不构成证据
+    相关性，数字与指标词才是。证据含数字归一化注释（LLM 常以
+    「6.44亿」作答而非原文「644,051,473.82」）。
+
+    只考核数字句：财报问答的编造风险集中在数字句，框架句
+    （「根据提供的证据…」「因此…」）不该被要求与证据重叠——
+    LLM 对比答案常因行文结构被误杀。年份（2026）不算数字证据，
+    否则「2026 年第一季度对比如下」这类框架句仍会被考核。
+    全答案无数字句时回退全句。
     """
-    sents = [s for s in _SENT_SPLIT.split(re.sub(r"\[[^\]]*\]", "", answer))
-             if len(s.strip()) >= 6]
-    if not sents:
+    # 句界含换行：LLM 引用行常以换行而非句号收尾（句号在引用后），
+    # 只按标点切会把整段答案并成一句，覆盖率失真
+    body = re.sub(r"\[[^\]]*\]", "", answer)
+    all_sents = [s.strip() for s in re.split(r"(?<=[。；！？])\s*|\n+", body)
+                 if len(s.strip()) >= 6]
+    if not all_sents:
         return 0.0
+    sents = [s for s in all_sents if re.search(r"\d", re.sub(r"20\d{2}", "", s))] \
+        or all_sents
     cited = [h for h in hits if h.chunk.citation in answer]
-    evidence = " ".join(h.chunk.text for h in (cited or hits[:4]))
-    etoks = set(word_tokens(evidence))
+    pool = cited or hits[:4]
+    companies = tuple(dict.fromkeys(
+        h.chunk.doc_id.split("_", 1)[0] for h in pool))
+    mchars = frozenset("".join(companies))
+    evidence = " ".join(f"{h.chunk.text} {' '.join(h.chunk.num_notes)}"
+                        for h in pool)
+    etoks = _content_tokens(word_tokens(evidence), extra_meta=companies,
+                            meta_chars=mchars)
     cov = []
     for s in sents:
-        stoks = set(word_tokens(s))
+        stoks = _content_tokens(word_tokens(s), extra_meta=companies,
+                                meta_chars=mchars)
         if not stoks:
             continue
         cov.append(len(stoks & etoks) / len(stoks))

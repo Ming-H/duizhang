@@ -126,11 +126,15 @@ def make_nodes(corpus: Corpus):
                 if intent not in ("metric", "summary", "compare", "other"):
                     intent = "metric"
                 raw_period = str(r.get("period", ""))
-                ph = period_hints(raw_period)      # LLM 可能回「2026一季报」等口语
+                if raw_period in ("H1", "Q1", "Q3", "FY"):
+                    period = raw_period
+                else:                     # LLM 可能回「2026一季报」等口语
+                    ph = period_hints(raw_period)
+                    period = ph[0] if ph else ""
                 u = {"intent": intent,
                      "companies": [c for c in r.get("companies", [])
                                    if isinstance(c, str)][:4],
-                     "period": ph[0] if ph else "",
+                     "period": period,
                      "reason": str(r.get("reason", ""))[:80]}
                 trace = ["understand:llm"]
             except Exception:
@@ -210,10 +214,12 @@ def make_nodes(corpus: Corpus):
         if state["mode"] == "llm" and llmx.llm_enabled():
             try:
                 r = llmx.chat_json(
-                    "你是检索质量评审。根据 query 与命中片段判断是否足够回答。返回 JSON："
+                    "你是检索质量评审。判断命中片段是否包含与 query 相关的财报信息、"
+                    "足以支撑回答——相关即可，不要求答案完整出现在片段里；"
+                    "拿不准时 sufficient=true。返回 JSON："
                     '{"sufficient":true/false,"reason":"一句话"}',
                     f"query: {state['query']}\n\n片段：\n"
-                    + "\n---\n".join(h.chunk.text[:200] for h in state["hits"][:3]))
+                    + "\n---\n".join(h.chunk.text[:400] for h in state["hits"][:4]))
                 sufficient = bool(r.get("sufficient", sufficient))
             except Exception:
                 fallback = ["grade:llm→fallback"]
@@ -245,14 +251,21 @@ def make_nodes(corpus: Corpus):
         u = state.get("understanding") or rule_understand(state["query"], corpus)
         companies = [c for c in (u.get("companies") or []) if c] or [""]
         period = u.get("period") or ""
+        # 子查询只留指标词：公司+期间的限定已由 doc_scope 完成，文本里
+        # 重复公司名/期间词只会让页眉块（公司名+报告标题）完美匹配，
+        # 把数字内容块挤出 top-k（实测海伦哲 top-4 全是页眉）
+        sub_text = state["query"]
+        for c in companies:
+            sub_text = sub_text.replace(c, " ")
+        sub_text = re.sub(r"对比|比较|哪家|谁强|差异|vs|VS|和|与|及", " ", sub_text)
+        sub_text = re.sub(r"\s+", " ", sub_text).strip() or state["query"]
         per: dict[str, list] = {}
         k_each = max(4, TOP_K // len(companies))
         for comp in companies:
             scope = {d for d, doc in corpus.docs.items()
                      if (not comp or doc.company == comp)
                      and (not period or period in doc.period)}
-            sub = f"{comp} {state['query']}" if comp else state["query"]
-            hits = corpus.search(expand_query(sub), k=k_each,
+            hits = corpus.search(expand_query(sub_text), k=k_each,
                                  doc_filter=comp, doc_scope=scope or None)
             if hits:
                 per[comp] = hits
@@ -269,21 +282,32 @@ def make_nodes(corpus: Corpus):
         hits = state["hits"]
         fallback: list[str] = []
         if state["mode"] == "llm" and llmx.llm_enabled():
+            # 证据带数字归一化注释（「≈4.19亿」是「多少亿」问法的命中通道）；
+            # 财报 PDF 表格抽取常见数字断裂，注释能补上量级锚点
             evidence = "\n\n".join(
-                f"[{h.chunk.doc_id} 第{h.chunk.page}页] {h.chunk.text[:400]}"
-                for h in hits[:4])
+                f"[{h.chunk.doc_id} 第{h.chunk.page}页] {h.chunk.text[:500]}"
+                + (f"（数字参考：{'；'.join(h.chunk.num_notes[:3])}）"
+                   if h.chunk.num_notes else "")
+                for h in hits[:8])
             try:
                 out = llmx.chat_text(
                     "你是财报问答助手。只依据给定证据回答；每个事实句末尾必须"
-                    "标注来源，格式如 [公司_报告期 第N页]。证据不足则回答"
-                    "「原文中没有找到依据」。禁止编造数字。",
+                    "标注来源，格式如 [公司_报告期 第N页]。证据来自 PDF 表格"
+                    "抽取，数字可能分行或断裂——可把相关数字碎片组织成答案"
+                    "并如实标注来源，但禁止编造不在证据里的数字。仔细区分"
+                    "指标本身的数值区间与「同比增加/将增加」的变动幅度，"
+                    "引用问题所问的那个。确实无任何相关数字才回答"
+                    "「原文中没有找到依据」。",
                     f"问题：{state['query']}\n\n证据：\n{evidence}")
                 if "没有找到依据" not in out:
-                    return {**state, "answer": out, "citations":
-                            [h.chunk.citation for h in hits[:4]],
+                    cited = list(dict.fromkeys(
+                        h.chunk.citation for h in hits[:8]
+                        if h.chunk.citation in out))
+                    return {**state, "answer": out, "citations": cited,
                             "trace": ["generate:llm"]}
-                return {**state, "answer": "", "verdict": "refused",
-                        "trace": ["generate:llm-no-evidence"]}
+                # LLM 判无据 → 降级抽取式（永远有真凭实据），而非拒答——
+                # 与 verify 的「降级而非失败」同一纪律
+                fallback = ["generate:llm-no-evidence→extractive"]
             except Exception:  # LLM 故障 → 走抽取式，绝不空手而归（留痕）
                 fallback = ["generate:llm→fallback"]
         body, cited = ans.extractive_answer(state, hits)

@@ -45,12 +45,16 @@ def test_chat_kwargs_thinking_gating(monkeypatch):
     monkeypatch.delenv("DZ_LLM_THINKING", raising=False)
     monkeypatch.delenv("DZ_LLM_BASE_URL", raising=False)
     monkeypatch.delenv("DZ_LLM_MAX_TOKENS", raising=False)
-    # 智谱端点（默认）→ 附加 thinking off
+    # 智谱端点（默认）：结构化小任务关思考，生成开思考
     assert llm._chat_kwargs(512)["extra_body"] == {"thinking": {"type": "disabled"}}
-    # 显式打开思考 → 不附加
+    assert "extra_body" not in llm._chat_kwargs(800, for_generation=True)
+    # 显式全开思考 → 小任务也不附加
     monkeypatch.setenv("DZ_LLM_THINKING", "enabled")
     assert "extra_body" not in llm._chat_kwargs(512)
-    # 非智谱端点 → 不附加
+    # 显式全关 → 生成也附加 disabled 标记（明确关）
+    monkeypatch.setenv("DZ_LLM_THINKING", "disabled")
+    assert llm._chat_kwargs(800, for_generation=True)["extra_body"] == {"thinking": {"type": "disabled"}}
+    # 非智谱端点 → 永不附加
     monkeypatch.delenv("DZ_LLM_THINKING", raising=False)
     monkeypatch.setenv("DZ_LLM_BASE_URL", "https://api.deepseek.com/v1")
     assert "extra_body" not in llm._chat_kwargs(512)

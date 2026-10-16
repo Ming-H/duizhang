@@ -288,6 +288,17 @@ def test_compare_decomposes_and_merges_both_companies():
     assert st["answer"]
 
 
+def test_boilerplate_strips_page_number_suffixed_headers():
+    """页眉与页码同行（「…2026年第一季度报告 4」）时，逐字比对把每页
+    当成不同行，页眉逃过 30% 频率剥离——归一化必须抹掉数字。"""
+    from duizhang.ingest import strip_boilerplate
+    pages = [f"徐州海伦哲专用车辆股份有限公司 2026年第一季度报告 {i}\n营业收入 100\n"
+             for i in range(1, 11)]
+    out = strip_boilerplate(pages, 10)
+    assert all("徐州海伦哲" not in p for p in out)   # 页眉（含页码后缀）剥离
+    assert all("营业收入" in p for p in out)         # 正文不受影响
+
+
 # ── 图行为 ──────────────────────────────────────────────
 
 
@@ -337,6 +348,33 @@ def test_eval_judge_expect_docs():
     one_only = {"answer": "k", "citations": [],
                 "hits": [_hit("a", "欧科亿_2026Q1", 1, 0, "k", 1)]}
     assert judge(case, one_only)["ok"] is False
+
+
+def test_coverage_evidence_includes_num_notes():
+    """LLM 常用数字注释的表述作答（6.44亿）而非原文数字（644,051,473.82），
+    证据池必须包含 num_notes——与 grade/extractive 的口径一致。"""
+    from duizhang.answer import citation_coverage
+    h = _hit("n1", "欧科亿_2026Q1", 11, 0,
+             "一、营业总收入 644,051,473.82 301,672,910.35", 1)
+    h.chunk.num_notes = ["≈6.44亿"]
+    answer = "欧科亿 2026 年第一季度营业总收入约 6.44亿。 [欧科亿_2026Q1 第11页]"
+    assert citation_coverage(answer, [h]) >= 0.45
+
+
+def test_coverage_grades_numeric_sentences_only():
+    """LLM 的对比答案含框架句（「根据提供的证据…如下」「因此…」）——
+    财报问答的编造风险集中在数字句，框架句不该拉低覆盖率均值；
+    全答案无数字句时回退全句考核（摘要类）。"""
+    from duizhang.answer import citation_coverage
+    h1 = _hit("a", "欧科亿_2026Q1", 11, 0,
+              "一、营业总收入 644,051,473.82 301,672,910.35", 1)
+    h2 = _hit("b", "海伦哲_2026Q1", 10, 0,
+              "一、营业总收入 520,053,589.94 345,593,109.95", 2)
+    answer = ("根据提供的证据，两家公司 2026 年第一季度营业收入对比如下。"
+              f"欧科亿营业收入 644,051,473.82 元 {h1.chunk.citation}。"
+              f"海伦哲营业收入 520,053,589.94 元 {h2.chunk.citation}。"
+              "因此欧科亿高于海伦哲。")
+    assert citation_coverage(answer, [h1, h2]) >= 0.45
 
 
 # ── 评估 ────────────────────────────────────────────────

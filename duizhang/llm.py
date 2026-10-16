@@ -60,18 +60,31 @@ def _max_tokens(default: int) -> int:
     return int(os.environ.get("DZ_LLM_MAX_TOKENS", default))
 
 
-def _thinking_off() -> bool:
-    """GLM 思考模式默认关：路由/评分/理解这类结构化小任务不需要思考，
-    省时省钱；DZ_LLM_THINKING=enabled 打开。扩展参数仅对智谱端点发送——
-    其它兼容端点（deepseek 等）不认识 extra_body.thinking，发了会 400。"""
+def _thinking_off(for_generation: bool = False) -> bool:
+    """GLM 思考策略分层（仅智谱端点发送该扩展参数，deepseek 等兼容端点
+    不认识，绝不附加）：
+
+    - 结构化小任务（理解/路由/评分/改写）：默认关——省时省钱，枚举
+      抽取不需要推理；
+    - 生成（for_generation=True）：默认开——碎片化表格证据里的数字
+      关联（区分主体区间与「同比增加」的变动幅度）需要推理，flash
+      档关思考实测会把变动区间误当指标值；
+    - DZ_LLM_THINKING=disabled 全关 / =enabled 全开。
+    """
     base = os.environ.get("DZ_LLM_BASE_URL", DEFAULT_BASE_URL)
-    return ("bigmodel" in base
-            and os.environ.get("DZ_LLM_THINKING", "disabled") != "enabled")
+    if "bigmodel" not in base:
+        return False
+    pref = os.environ.get("DZ_LLM_THINKING", "auto")
+    if pref == "disabled":
+        return True
+    if pref == "enabled":
+        return False
+    return not for_generation
 
 
-def _chat_kwargs(max_tokens: int) -> dict:
+def _chat_kwargs(max_tokens: int, for_generation: bool = False) -> dict:
     kw = {"max_tokens": _max_tokens(max_tokens)}
-    if _thinking_off():
+    if _thinking_off(for_generation):
         kw["extra_body"] = {"thinking": {"type": "disabled"}}
     return kw
 
@@ -118,6 +131,6 @@ def chat_text(system: str, user: str, max_tokens: int = 800) -> str:
         messages=[{"role": "system", "content": system},
                   {"role": "user", "content": user}],
         temperature=0.2,
-        **_chat_kwargs(max_tokens),
+        **_chat_kwargs(max_tokens, for_generation=True),
     )
     return resp.choices[0].message.content or ""

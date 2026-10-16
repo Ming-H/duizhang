@@ -45,6 +45,8 @@ METRIC_SYNONYMS = {
     "毛利": ["毛利率", "营业成本"],
     "市值": ["总市值", "市值"],
     "在手": ["手持"],
+    "赚": ["净利润", "归属于母公司所有者的净利润"],
+    "盈利": ["净利润", "归属于母公司所有者的净利润"],
     "eps": ["基本每股收益", "每股收益"],
     "roe": ["加权平均净资产收益率", "净资产收益率"],
 }
@@ -180,7 +182,11 @@ def strip_boilerplate(pages: list[str], page_count: int) -> list[str]:
     from collections import Counter
 
     def _norm(ln: str) -> str:
-        return re.sub(r"\s+", "", ln)
+        # 抹掉数字：页眉常与页码同行（「…报告 4」），逐页不同的数字会让
+        # 同一句页眉被当成不同行，逃过 30% 频率剥离（实测海伦哲 2026Q1
+        # 的 13 页页眉全部残留、挤掉数字块进 top-k）。真正文行撞上
+        # 「数字等价 + ≥30% 页频 + 8-60 字长」三重门槛的概率极低。
+        return re.sub(r"[\s\d]+", "", ln)
 
     freq = Counter()
     for pt in pages:
