@@ -20,6 +20,16 @@ python -m duizhang.cli ask "欧科亿 2026 年半年度预计净利润多少"
 python -m duizhang.cli eval
 ```
 
+## 〇、定位：workflow → Agentic RAG 的取舍
+
+按 Anthropic《Building Effective Agents》的划分，v0.4 的系统是教科书式的
+**workflow**（图编译期固定、条件边是确定性代码）——这在财报域是刻意的：
+对账闸门必须确定、评估必须可回归。v0.5 把**大模型装进驾驶位**：理解、路由、
+评分、改写、多跳分解、生成全部由 LLM 决策（understand 节点一次结构化抽取
+驱动检索限定），升级为 **Agentic RAG**；而答案出口的 verify 闸门保持确定性
+代码——「自由规划、强制对账」。规则模式保留为零 key 兜底与回归基线，
+同一张图两种大脑，同一套评估双模式对比。取舍记录见 `DESIGN-v0.5.md`。
+
 ## 一、系统鸟瞰
 
 ```
