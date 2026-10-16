@@ -1,4 +1,4 @@
-"""LLM 层：.env 装载 / 智谱默认值 / JSON 容错 / thinking 控制（全离线）。"""
+"""LLM 层：.env 装载 / 本地 Ollama 默认 / JSON 容错 / 多协议（全离线）。"""
 
 
 import pytest
@@ -10,24 +10,56 @@ def test_load_dotenv_reads_and_does_not_override(tmp_path):
     """KEY=VALUE 逐行装载；已存在的环境变量不覆盖（env 优先于 .env）。"""
     env_file = tmp_path / ".env"
     env_file.write_text(
-        'DZ_LLM_API_KEY="key123"\nDZ_LLM_MODEL=glm-4.6\n'
+        'DZ_LLM_API_KEY="key123"\nDZ_LLM_MODEL=qwen3.5:0.8b\n'
         "# 注释行\nBADLINE 无等号\n\n", encoding="utf-8")
-    env: dict[str, str] = {"DZ_LLM_MODEL": "glm-4-flash"}   # 已存在
+    env: dict[str, str] = {"DZ_LLM_MODEL": "qwen3:0.6b"}   # 已存在
     llm._load_dotenv(env_file, env=env)
     assert env["DZ_LLM_API_KEY"] == "key123"
-    assert env["DZ_LLM_MODEL"] == "glm-4-flash"      # 未被 .env 覆盖
+    assert env["DZ_LLM_MODEL"] == "qwen3:0.6b"       # 未被 .env 覆盖
+
+
+def test_local_defaults():
+    """本地 Ollama 是默认 provider：零 key 零费用零外呼。"""
+    assert llm.DEFAULT_BASE_URL == "http://localhost:11434/v1"
+    assert llm.DEFAULT_MODEL == "qwen3.5:0.8b"
+
+
+def test_llm_enabled_local_without_key(monkeypatch):
+    """本地端点免鉴权：无 key 也启用；远端端点仍需 key。"""
+    monkeypatch.delenv("DZ_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("DZ_LLM_BASE_URL", raising=False)
+    assert llm.llm_enabled() is True            # 默认即本地 Ollama
+    monkeypatch.setenv("DZ_LLM_BASE_URL", "https://api.deepseek.com/v1")
+    assert llm.llm_enabled() is False           # 远端无 key 不启用
+    monkeypatch.setenv("DZ_LLM_API_KEY", "sk-x")
+    assert llm.llm_enabled() is True
+
+
+def test_local_chat_uses_native_api(monkeypatch):
+    """本地通道走 Ollama 原生 /api/chat（OpenAI 兼容端点忽略 think 参数、
+    思考会吃光 max_tokens 致正文为空——实测）。think 默认关：本地结构化
+    调用要速度；DZ_LLM_THINKING=enabled 打开。"""
+
+    captured = {}
+
+    def fake_post(url, payload, timeout=300):
+        captured["url"], captured["payload"] = url, payload
+        return {"message": {"content": '```json\n{"ok": 1}\n```', "thinking": "x"}}
+
+    monkeypatch.setattr(llm, "_http_post_json", fake_post)
+    monkeypatch.setenv("DZ_LLM_BASE_URL", "http://localhost:11434/v1")
+    assert llm.chat_json("sys", "user") == {"ok": 1}
+    assert captured["url"].endswith("/api/chat")          # 原生端点
+    assert captured["payload"]["think"] is False          # 默认关思考
+    monkeypatch.setenv("DZ_LLM_THINKING", "enabled")
+    llm.chat_text("sys", "user")
+    assert captured["payload"]["think"] is True           # 显式打开
 
 
 def test_load_dotenv_missing_file_is_noop(tmp_path):
     env: dict[str, str] = {}
     llm._load_dotenv(tmp_path / "absent.env", env=env)
     assert env == {}
-
-
-def test_zhipu_defaults():
-    """智谱 GLM 是默认 provider：任意 OpenAI 兼容端点仍可用 env 覆盖。"""
-    assert "open.bigmodel.cn/api/paas/v4" in llm.DEFAULT_BASE_URL
-    assert llm.DEFAULT_MODEL == "glm-4.5-flash"   # 免费档，开箱可用
 
 
 def test_parse_json_tolerant():
@@ -37,27 +69,6 @@ def test_parse_json_tolerant():
     assert llm._parse_json('好的，结果是 {"a": {"b": 1}} 以上。') == {"a": {"b": 1}}
     with pytest.raises(ValueError):
         llm._parse_json("完全不是 JSON")
-
-
-def test_chat_kwargs_thinking_gating(monkeypatch):
-    """GLM 思考模式默认关（结构化小任务省时省钱）；仅智谱端点附加扩展参数，
-    其它兼容端点（如 deepseek）不认识这个参数绝不发送。"""
-    monkeypatch.delenv("DZ_LLM_THINKING", raising=False)
-    monkeypatch.delenv("DZ_LLM_BASE_URL", raising=False)
-    monkeypatch.delenv("DZ_LLM_MAX_TOKENS", raising=False)
-    # 智谱端点（默认）：结构化小任务关思考，生成开思考
-    assert llm._chat_kwargs(512)["extra_body"] == {"thinking": {"type": "disabled"}}
-    assert "extra_body" not in llm._chat_kwargs(800, for_generation=True)
-    # 显式全开思考 → 小任务也不附加
-    monkeypatch.setenv("DZ_LLM_THINKING", "enabled")
-    assert "extra_body" not in llm._chat_kwargs(512)
-    # 显式全关 → 生成也附加 disabled 标记（明确关）
-    monkeypatch.setenv("DZ_LLM_THINKING", "disabled")
-    assert llm._chat_kwargs(800, for_generation=True)["extra_body"] == {"thinking": {"type": "disabled"}}
-    # 非智谱端点 → 永不附加
-    monkeypatch.delenv("DZ_LLM_THINKING", raising=False)
-    monkeypatch.setenv("DZ_LLM_BASE_URL", "https://api.deepseek.com/v1")
-    assert "extra_body" not in llm._chat_kwargs(512)
 
 
 def test_anthropic_protocol_detection_and_dispatch(monkeypatch):
@@ -83,8 +94,7 @@ def test_anthropic_protocol_detection_and_dispatch(monkeypatch):
             def create(**kw):
                 return _Resp()
 
-    monkeypatch.delenv("DZ_LLM_BASE_URL", raising=False)
-    monkeypatch.setattr(llm, "_use_anthropic", lambda: True)
+    monkeypatch.setenv("DZ_LLM_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
     fa = _FakeAnthropic()
     monkeypatch.setattr(llm, "_client_anthropic", lambda: fa)
     assert llm.chat_json("sys", "user") == {"ok": True}   # 围栏 JSON 也解析

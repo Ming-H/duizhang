@@ -1,10 +1,18 @@
-"""LLM 层：默认智谱 GLM（OpenAI 兼容端点），任意兼容端点可换。
+"""LLM 层：默认本地 Ollama（零 key 零费用零外呼），任意远端可换。
 
-v0.5 起 LLM 是系统的大脑（查询理解/评分/改写/生成四个决策点）；
-heuristic 规则模式保留为零 key 兜底与回归基线。
+v0.5.1 起 LLM 默认走本地（qwen3.5:0.8b @ Ollama）——全本地 Agentic RAG；
+接远端（任意 OpenAI 兼容端点 / Anthropic 兼容端点）只需 .env 覆盖。
 
-密钥安全：API key 只放 .env（gitignored），由 _load_dotenv 装载；
-已存在的环境变量优先，绝不覆盖。密钥不进代码、不进文档、不进 git。
+通道选择（按 base_url 自动判定）：
+- 本地端点（localhost/127.0.0.1）→ Ollama **原生 /api/chat**：
+  OpenAI 兼容端点实测忽略 think 参数、思考吃光 max_tokens 致正文为空；
+  原生端点 think 有效（结构化调用默认关，DZ_LLM_THINKING=enabled 打开）
+- 含 /api/anthropic → Anthropic Messages 协议（常思模型注意思考计入
+  max_tokens，此通道预算 ×8）
+- 其余 → OpenAI 兼容 chat/completions
+
+密钥：本地免鉴权；远端密钥只放 .env（gitignored），_load_dotenv 装载
+且环境变量优先。密钥不进代码、不进文档、不进 git。
 """
 
 from __future__ import annotations
@@ -16,8 +24,8 @@ from collections.abc import MutableMapping
 from functools import lru_cache
 from pathlib import Path
 
-DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"
-DEFAULT_MODEL = "glm-4.5-flash"   # 免费档；充值后 .env 改 glm-4.6 提质
+DEFAULT_BASE_URL = "http://localhost:11434/v1"   # 本地 Ollama
+DEFAULT_MODEL = "qwen3.5:0.8b"
 
 
 def _load_dotenv(path: str | Path = ".env",
@@ -41,41 +49,82 @@ def _load_dotenv(path: str | Path = ".env",
 _load_dotenv()   # 导入即装载（仓库根/当前目录的 .env，不存在则跳过）
 
 
-def llm_enabled() -> bool:
-    return bool(os.environ.get("DZ_LLM_API_KEY"))
-
-
 def _base_url() -> str:
     return os.environ.get("DZ_LLM_BASE_URL", DEFAULT_BASE_URL)
 
 
+def _use_local() -> bool:
+    return "localhost" in _base_url() or "127.0.0.1" in _base_url()
+
+
+def llm_enabled() -> bool:
+    """本地端点免鉴权（无 key 即启用）；远端端点需要 key。"""
+    if os.environ.get("DZ_LLM_API_KEY"):
+        return True
+    return _use_local()
+
+
+# ── 本地通道：Ollama 原生 /api/chat ────────────────────
+
+
+def _http_post_json(url: str, payload: dict, timeout: int = 300) -> dict:
+    """stdlib POST（不引第三方依赖；本地调用毫秒级建连）。"""
+    import urllib.request
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _local_think() -> bool:
+    """本地思考默认关：0.8b 开思考延迟约 ×5（14s vs 3s，实测）且吃光
+    预算；结构化抽取靠规则兜底，生成弱由 verify 闸门降级抽取式——
+    系统纪律本来就兜得住。DZ_LLM_THINKING=enabled 可打开试质量。"""
+    return os.environ.get("DZ_LLM_THINKING", "disabled") == "enabled"
+
+
+def _local_chat(system: str, user: str, max_tokens: int) -> str:
+    base = _base_url().rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    r = _http_post_json(f"{base}/api/chat", {
+        "model": os.environ.get("DZ_LLM_MODEL", DEFAULT_MODEL),
+        "stream": False,
+        "think": _local_think(),
+        "options": {"temperature": 0, "num_predict": _max_tokens(max_tokens)},
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": user}]})
+    return (r.get("message") or {}).get("content") or ""
+
+
+# ── 远端通道 ────────────────────────────────────────────
+
+
 def _use_anthropic() -> bool:
-    """GLM Coding Plan 的配额只在 Anthropic 兼容端点（…/api/anthropic）
-    有效——v4 按量端点会报余额不足（实测）。base_url 指向该端点时走
-    Anthropic Messages 协议（Claude Code 同款通道）。"""
+    """Anthropic 兼容端点（含 /api/anthropic）走 Messages 协议。"""
     return "/api/anthropic" in _base_url()
 
 
 @lru_cache(maxsize=1)
 def _client():
-    from openai import OpenAI  # 延迟导入：heuristic 模式不要求安装 openai
+    from openai import OpenAI  # 延迟导入：本地/无 key 模式不要求安装
     return OpenAI(
-        api_key=os.environ["DZ_LLM_API_KEY"],
+        api_key=os.environ.get("DZ_LLM_API_KEY", "local"),
         base_url=_base_url(),
     )
 
 
 @lru_cache(maxsize=1)
 def _client_anthropic():
-    from anthropic import Anthropic  # 延迟导入：仅 Coding Plan 端点需要
+    from anthropic import Anthropic  # 延迟导入：仅 Anthropic 端点需要
     return Anthropic(api_key=os.environ["DZ_LLM_API_KEY"], base_url=_base_url())
 
 
 def _anthropic_text(system: str, user: str, max_tokens: int) -> str:
-    """Anthropic Messages 协议单轮调用（glm-5.3 等常思模型走此通道）。
-    注意：新版 SDK 无 temperature 参数；thinking 默认开启且计入
-    max_tokens——512 的默认预算会被思考吃光导致正文为空（实测），
-    此通道预算至少 ×8。"""
+    """Anthropic Messages 协议单轮调用。注意：新版 SDK 无 temperature
+    参数；常思模型思考计入 max_tokens——512 会被思考吃光导致正文为空
+    （实测），此通道预算 ×8（DZ_LLM_MAX_TOKENS 显式设置时不放大）。"""
     r = _client_anthropic().messages.create(
         model=os.environ.get("DZ_LLM_MODEL", DEFAULT_MODEL),
         max_tokens=_max_tokens(max_tokens * 8 if not os.environ.get("DZ_LLM_MAX_TOKENS") else max_tokens),
@@ -85,38 +134,8 @@ def _anthropic_text(system: str, user: str, max_tokens: int) -> str:
 
 
 def _max_tokens(default: int) -> int:
-    """DZ_LLM_MAX_TOKENS 可覆盖：重思考模型（如 GLM）的 reasoning token
-    计入 max_tokens，默认值会被思考吃光导致正文为空。"""
+    """DZ_LLM_MAX_TOKENS 可覆盖输出预算。"""
     return int(os.environ.get("DZ_LLM_MAX_TOKENS", default))
-
-
-def _thinking_off(for_generation: bool = False) -> bool:
-    """GLM 思考策略分层（仅智谱端点发送该扩展参数，deepseek 等兼容端点
-    不认识，绝不附加）：
-
-    - 结构化小任务（理解/路由/评分/改写）：默认关——省时省钱，枚举
-      抽取不需要推理；
-    - 生成（for_generation=True）：默认开——碎片化表格证据里的数字
-      关联（区分主体区间与「同比增加」的变动幅度）需要推理，flash
-      档关思考实测会把变动区间误当指标值；
-    - DZ_LLM_THINKING=disabled 全关 / =enabled 全开。
-    """
-    base = os.environ.get("DZ_LLM_BASE_URL", DEFAULT_BASE_URL)
-    if "bigmodel" not in base:
-        return False
-    pref = os.environ.get("DZ_LLM_THINKING", "auto")
-    if pref == "disabled":
-        return True
-    if pref == "enabled":
-        return False
-    return not for_generation
-
-
-def _chat_kwargs(max_tokens: int, for_generation: bool = False) -> dict:
-    kw = {"max_tokens": _max_tokens(max_tokens)}
-    if _thinking_off(for_generation):
-        kw["extra_body"] = {"thinking": {"type": "disabled"}}
-    return kw
 
 
 def _parse_json(raw: str) -> dict:
@@ -140,8 +159,13 @@ def _parse_json(raw: str) -> dict:
     raise ValueError("unbalanced json object")
 
 
+# ── 统一入口 ────────────────────────────────────────────
+
+
 def chat_json(system: str, user: str, max_tokens: int = 512) -> dict:
     """要求 JSON 输出的单轮调用；解析失败抛 ValueError 由调用节点降级。"""
+    if _use_local():
+        return _parse_json(_local_chat(system, user, max_tokens))
     if _use_anthropic():
         return _parse_json(_anthropic_text(system, user, max_tokens))
     resp = _client().chat.completions.create(
@@ -150,12 +174,14 @@ def chat_json(system: str, user: str, max_tokens: int = 512) -> dict:
                   {"role": "user", "content": user}],
         temperature=0,
         response_format={"type": "json_object"},
-        **_chat_kwargs(max_tokens),
+        max_tokens=_max_tokens(max_tokens),
     )
     return _parse_json(resp.choices[0].message.content or "")
 
 
 def chat_text(system: str, user: str, max_tokens: int = 800) -> str:
+    if _use_local():
+        return _local_chat(system, user, max_tokens)
     if _use_anthropic():
         return _anthropic_text(system, user, max_tokens)
     resp = _client().chat.completions.create(
@@ -163,6 +189,6 @@ def chat_text(system: str, user: str, max_tokens: int = 800) -> str:
         messages=[{"role": "system", "content": system},
                   {"role": "user", "content": user}],
         temperature=0.2,
-        **_chat_kwargs(max_tokens, for_generation=True),
+        max_tokens=_max_tokens(max_tokens),
     )
     return resp.choices[0].message.content or ""
