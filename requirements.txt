@@ -1,5 +1,5 @@
 langgraph>=0.2
 pypdf>=4.0
 jieba>=0.42
-openai>=1.30          # 任意 OpenAI 兼容端点（含智谱 v4）
-anthropic>=0.60       # GLM Coding Plan（Anthropic 兼容端点）；不用可不装
+openai>=1.30          # 远端 OpenAI 兼容端点（本地 Ollama 不需要）
+anthropic>=0.60       # 远端 Anthropic 兼容端点（可选）

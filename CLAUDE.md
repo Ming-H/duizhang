@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-对账 duizhang — a Chinese financial-report **Agentic RAG** QA engine ("every answer must be reconcilable against the source"). Since v0.5 the LLM (zhipu GLM by default) is the default brain: it drives query understanding, routing, retrieval grading, rewriting, multi-company compare decomposition, and grounded generation. Deterministic code owns the exit gate (`verify_citations`): degrade or refuse, never fabricate. The rule mode (`heuristic`) remains as the zero-key fallback and regression baseline — same graph, two brains.
+对账 duizhang — a Chinese financial-report **Agentic RAG** QA engine ("every answer must be reconcilable against the source"). Since v0.5.1 the LLM defaults to a LOCAL Ollama model (qwen3.5:0.8b, zero key/cost/egress): it drives query understanding, routing, retrieval grading, rewriting, multi-company compare decomposition, and grounded generation. Deterministic code owns the exit gate (`verify_citations`): degrade or refuse, never fabricate. The rule mode (`heuristic`) remains as the zero-key fallback and regression baseline — same graph, two brains.
 
 All code comments, docstrings, docs, and commit messages are in Chinese — follow that convention.
 
@@ -30,7 +30,7 @@ ruff check .                            # lint (CI enforces)
 
 After changing retrieval/graph/answer code, run `python -m duizhang.cli eval` (heuristic) and verify the three metrics don't regress (full corpus: 1.00/1.00/1.00). Bug fixes follow TDD — failing test first, watch it fail, then fix (DESIGN-v0.4.md §5 and DESIGN-v0.5.md record two such rounds).
 
-Secrets: `DZ_LLM_API_KEY` lives ONLY in `.env` (gitignored; `_load_dotenv` loads it, env vars take precedence). Never write the key into code, docs, sample commands, or git history. Two provider channels: v4 pay-per-use (`/api/paas/v4`, default glm-4.5-flash free tier) and GLM Coding Plan (`/api/anthropic` — plan quota is ONLY valid there; `llm._use_anthropic()` auto-switches protocol; glm-5.3 always thinks and thinking counts toward max_tokens, so the anthropic path multiplies the budget ×8). Other env: `DZ_DB`, `DZ_LLM_MODEL`, `DZ_LLM_MAX_TOKENS`, `DZ_LLM_THINKING`.
+Secrets: `DZ_LLM_API_KEY` lives ONLY in `.env` (gitignored; `_load_dotenv` loads it, env vars take precedence). Never write the key into code, docs, sample commands, or git history. Default channel is LOCAL Ollama via its NATIVE `/api/chat` (`llm._local_chat`): the OpenAI-compat `/v1` endpoint ignores the `think` param, `/no_think` soft switch is dead in Qwen3.5, and thinking starves max_tokens leaving content empty (all three measured — DESIGN-v0.5.md D7). Local endpoints need no key (`llm_enabled` is True for localhost). `think` defaults OFF locally (~×5 latency when on). Remote options via `.env`: any OpenAI-compatible endpoint, or Anthropic-compatible (`_use_anthropic`; thinking counts toward max_tokens → budget ×8). Requires Ollama ≥ 0.40. Other env: `DZ_DB`, `DZ_LLM_MODEL`, `DZ_LLM_MAX_TOKENS`, `DZ_LLM_THINKING`.
 
 ## Architecture
 

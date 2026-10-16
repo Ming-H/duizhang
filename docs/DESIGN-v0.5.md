@@ -91,3 +91,39 @@ coverage 口径六组）；ruff 全绿；conftest 封网。
   评估相关 5 文档；其余文档下次更新时自愈）
 - glm-4.6 充值后重跑 agent 集预期 default 集方差收窄
 - 向量检索/rerank 仍按 DESIGN-scale §6 触发条件排队
+
+
+## 5. v0.5.1 追加：默认大脑切换为本地（2026-10-16）
+
+用户决策：默认走本地 Ollama qwen3.5:0.8b（零 key 零费用零外呼），
+GLM 配置退场（远端通道保留为通用能力）。
+
+### D7 本地通道必须走 Ollama 原生 /api/chat（三重实测）
+
+| 尝试 | 结果 | 否决理由 |
+|---|---|---|
+| OpenAI 兼容端点 + `extra_body={"think": false}` | think 被忽略 | 0.40.4 的 /v1 不透传 think |
+| OpenAI 兼容端点 + `/no_think` 提示词软开关 | reasoning 照发 | Qwen3.5 模板弃用了软开关 |
+| OpenAI 兼容端点 + 大预算放任思考 | 正文常为空 | 思考吃光 max_tokens（content=''） |
+| **原生 /api/chat + `think` 参数** | ✅ 开 14.4s / 关 3.0s | 唯一可靠通道 |
+
+实现：stdlib urllib（零新依赖）。think 默认关（0.8b 开思考延迟 ×5）；
+`DZ_LLM_THINKING=enabled` 打开。环境要求 Ollama ≥ 0.40（0.21 拉不动
+qwen3.5，412 实测）。
+
+### D8 llm_enabled 语义更新
+
+本地端点（localhost/127.0.0.1）免鉴权：无 key 即启用；远端端点仍需
+key。conftest 把 base_url 固定为远端占位——测试与机器是否装 Ollama
+完全无关。
+
+### 验收（qwen3.5:0.8b 本地，全量语料）
+
+| 数据集 | retrieval@3 | answer_hit | refusal |
+|---|---|---|---|
+| agent | **1.00** | **1.00** | **1.00** |
+| default | 0.875 | 0.875 | 1.00 |
+
+单题 ~10s（含模型加载）。关键观察：**0.8b 生成弱 → verify 闸门降级
+抽取式 → 答案仍满分**——正确性由「理解+检索+闸门」的架构保证，
+不依赖生成模型质量；这是本系统最硬的一条架构论证。

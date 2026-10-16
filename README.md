@@ -4,7 +4,8 @@
 
 > **RAG 的每个答案都要能对账。**
 
-带证据链纠错环的 **Agentic RAG** 财报问答引擎：LLM（智谱 GLM，默认大脑）
+带证据链纠错环的 **Agentic RAG** 财报问答引擎：LLM（本地 qwen3.5:0.8b，
+零 key 零费用零外呼）
 决定「怎么查」——查询理解、路由、检索质量评判、query 改写、**多公司对比分解**、
 grounded 生成；确定性代码决定「答案能不能出门」——引用覆盖率闸门不过就降级或
 拒答。逐句挂引用、引用必可回溯到财报原文的页与段；对不上的答案宁可拒答，也不编。
@@ -24,24 +25,26 @@ python -m duizhang.cli ask "欧科亿 2026 年半年度预计净利润多少"
 python -m duizhang.cli eval                # 内置评估集，一条命令复现
 ```
 
-零 key 也能跑（`--mode auto`：无 key 自动走规则模式）。**启用 LLM 大脑**：
-把密钥写进 `.env`（已 gitignore，绝不进 git）：
+**LLM 大脑默认就在本地**：装好 [Ollama](https://ollama.com)（≥0.40）并
+`ollama pull qwen3.5:0.8b`，零 key 零配置直接可用（本地端点免鉴权）：
 
 ```bash
-cat > .env <<'EOF'
-# 方式 A：GLM Coding Plan（Anthropic 兼容端点，订阅配额内零额外费用）
-DZ_LLM_API_KEY=你的coding plan token
-DZ_LLM_BASE_URL=https://open.bigmodel.cn/api/anthropic
-DZ_LLM_MODEL=glm-5.3
-# 方式 B：v4 免费档——注释掉上面三行，改用：
-# DZ_LLM_API_KEY=你的key
-# DZ_LLM_MODEL=glm-4.5-flash
-EOF
+ollama pull qwen3.5:0.8b
 python -m duizhang.cli ask "对比欧科亿和海伦哲 2026 一季度谁赚得多"   # 多跳对比
 python -m duizhang.cli eval --mode llm --dataset agent
 ```
 
-任意 OpenAI 兼容端点可换：`DZ_LLM_BASE_URL` 覆盖（deepseek/gpt 均可）。
+没装 Ollama 也能跑（`--mode auto`：本地不可用自动走规则模式）。要接远端，
+把配置写进 `.env`（已 gitignore，绝不进 git）——任意 OpenAI 兼容端点
+（deepseek/智谱 v4/gpt）或 Anthropic 兼容端点均可：
+
+```bash
+cat >> .env <<'EOF'
+DZ_LLM_API_KEY=你的key
+DZ_LLM_BASE_URL=https://api.deepseek.com/v1
+DZ_LLM_MODEL=deepseek-chat
+EOF
+```
 
 全量语料：`python -m duizhang.cli ingest data/corpus`（manifest 指纹增量，
 新增/修改/删除自适应，幂等运行秒级返回；**多根摄取互不干扰**——
@@ -72,9 +75,10 @@ START → understand ──→ route ──metric──→ retrieve → grade_do
 
 ## 设计原则
 
-- **LLM 是大脑，规则是兜底**（v0.5）：`--mode auto` 有 key 走 LLM、无 key
-  走规则——同一张图，两种大脑。规则模式是零 key 演示与回归基线，
-  LLM 模式是默认主力；模型每代都在变，编排假设要能活过任何一版实现。
+- **LLM 是大脑，本地是默认**（v0.5.1）：默认本地 Ollama qwen3.5:0.8b
+  （零 key 零费用零外呼），`--mode auto` 本地不可用自动退规则——同一张
+  图，两种大脑；远端任意 OpenAI/Anthropic 兼容端点 `.env` 三行可换。
+  模型每代都在变，编排假设要能活过任何一版实现。
 - **自由规划、强制对账**：LLM 决定怎么查；答案出口的覆盖率闸门是
   确定性代码，模型无权跳过。
 - **元数据白捡**：巨潮财报命名 `公司_报告期类型.pdf` 自带公司与期间，解析文件名而非让模型猜。
@@ -91,13 +95,15 @@ START → understand ──→ route ──metric──→ retrieve → grade_do
 | 数据集 | 模式 | retrieval@3 | answer hit | refusal |
 |---|---|---|---|---|
 | default（10 题，CI 回归） | heuristic | 1.00 | 1.00 | 1.00 |
-| default | llm（glm-5.3） | 1.00 | 0.875 | 1.00 |
+| default | llm（qwen3.5:0.8b 本地） | 0.875 | 0.875 | 1.00 |
 | agent（3 对比 + 3 单跳/摘要 + 2 陷阱） | heuristic | 1.00 | 1.00 | 1.00 |
-| agent | **llm（glm-5.3）** | **1.00** | **1.00** | **1.00** |
+| agent | **llm（qwen3.5:0.8b 本地）** | **1.00** | **1.00** | **1.00** |
+| agent | llm（glm-5.3 远端，对照） | 1.00 | 1.00 | 1.00 |
 
-glm-5.3 走 GLM Coding Plan（Anthropic 兼容端点，Claude Code 同款通道，
-订阅配额内零额外费用）；glm-4.5-flash 走 v4 免费档（default 集方差
-0.75–0.875，如实记录）；heuristic 模式可复现无方差。陷阱题两类：未来期间（2030）与领域外（天气）——都必须拒答。
+**架构比模型更保命**：0.8b 本地小模型的生成质量不足时，verify 闸门
+自动降级为抽取式作答——agent 集满分的含金量在「理解+检索+闸门」，
+不在生成模型。glm-5.3（远端对照）走 GLM Coding Plan 的 Anthropic
+兼容端点；heuristic 模式可复现无方差。陷阱题两类：未来期间（2030）与领域外（天气）——都必须拒答。
 多跳对比题示例：`对比欧科亿和海伦哲 2026 一季度谁赚得多` → 分解检索两家
 Q1 净利润证据 → 对比作答。历史修复记录见 `docs/DESIGN-v0.4.md` §5、
 `docs/DESIGN-v0.5.md`。
@@ -141,9 +147,10 @@ docs/               # 设计文档 ×4 + EXPLAINER 讲解 + 流程动效图
 
 ## 密钥安全
 
-- API key 只放 `.env`（已 gitignore），`_load_dotenv` 装载且环境变量优先
+- 默认本地 Ollama **无需任何密钥**；接远端时 key 只放 `.env`
+  （已 gitignore），`_load_dotenv` 装载且环境变量优先
 - 密钥不进代码、不进文档、不进示例命令、不进 git 历史
-- 测试套件 conftest 全局封网，CI 无密钥也能全绿
+- 测试套件 conftest 全局封网（与机器上是否装 Ollama 无关），CI 无密钥全绿
 
 ## Roadmap
 
