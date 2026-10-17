@@ -165,6 +165,30 @@ def test_period_filter_is_doc_level():
     assert {h.chunk.doc_id for h in out["hits"]} == {"欧科亿_2026Q1"}
 
 
+def test_retrieve_year_scope():
+    """期间过滤必须含年份维度：问 2025Q1 时 2024Q1/2026Q1 的块不该
+    入场（中际旭创三年语料实测：三期 Q1 块混排在答案里）。"""
+
+    class YearCorpus:
+        def __init__(self):
+            from duizhang.schemas import Doc
+            self.docs = {f"中际旭创_{y}Q1": Doc(f"中际旭创_{y}Q1", "中际旭创",
+                                                f"{y}Q1", "一季报", "x", 5)
+                         for y in (2024, 2025, 2026)}
+
+        def search(self, query, k=8, doc_filter="", doc_scope=None):
+            from duizhang.schemas import Chunk, Retrieved
+            return [Retrieved(Chunk(f"{d}#c", d, 9, 0, "营业总收入 1"),
+                              0.1, i + 1)
+                    for i, d in enumerate(doc_scope or [])][:k]
+
+    from duizhang.graph import make_nodes
+    retrieve = make_nodes(YearCorpus())[2]
+    st = new_state("中际旭创 2025 年第一季度营业收入多少", "heuristic")
+    out = retrieve(st)
+    assert {h.chunk.doc_id for h in out["hits"]} == {"中际旭创_2025Q1"}
+
+
 # ── 查询理解（understand 节点） ─────────────────────────
 
 
@@ -468,9 +492,57 @@ def test_summary_route_not_hijacked(app):
 
 
 def test_period_guard_refuses_future_year(app):
+    """期间守卫要给出具体原因（库里有哪些期间、缺哪年）——此前被
+    通用 refuse 文案覆盖（茅台示例实测暴露）。"""
     st = _ask(app, "欧科亿 2030 年营收预测")
     assert st["verdict"] == "refused"
-    assert "没有" in st["answer"]
+    assert "现有期间" in st["answer"]          # 具体提示保留到最终答案
+
+
+def test_summarize_keylines_from_retrieval_not_head():
+    """长报告（184-236 页）要点藏在第 10 页后的经营分析，文档头部
+    12 块是封面/董事名录——要点抓取必须以检索命中块为种子（茅台
+    102 页年报实测要点为空）。"""
+
+    class SummaryCorpus:
+        def __init__(self):
+            from duizhang.schemas import Doc
+            self.docs = {
+                "中际旭创_2024FY": Doc("中际旭创_2024FY", "中际旭创",
+                                       "2024FY", "年报", "x", 236),
+                "中际旭创_2025FY": Doc("中际旭创_2025FY", "中际旭创",
+                                       "2025FY", "年报", "x", 229)}
+
+        def search(self, q, k=6, doc_filter="", doc_scope=None):
+            from duizhang.schemas import Chunk, Retrieved
+            scope = doc_scope or set()
+            if any("2025FY" in d for d in scope):
+                return [Retrieved(chunk=Chunk(
+                    "c1", "中际旭创_2025FY", 12, 0,
+                    "中际旭创 2025 年报：报告期内实现营业收入 1,000,000 万元，"
+                    "同比增长 50%。"),
+                    score=0.05, rank=1)]
+            if not scope:   # 复现真实排序：无范围时旧年报块抢占
+                return [Retrieved(chunk=Chunk(
+                    "c0", "中际旭创_2024FY", 10, 0,
+                    "中际旭创 2024 年报：经营情况讨论与分析。"),
+                    score=0.05, rank=1)]
+            return []
+
+        def chunks_of(self, doc_id, limit=12):
+            from duizhang.schemas import Chunk
+            return [Chunk(f"h{i}", doc_id, 1, i, "董事 杜某 2013 年 3 月")
+                    for i in range(12)]          # 头部全是名录
+
+    from duizhang.graph import make_nodes
+    summarize = make_nodes(SummaryCorpus())[7]
+    st = summarize({**new_state("总结一下中际旭创 2025 年报", "heuristic"),
+                    "understanding": {"intent": "summary",
+                                      "companies": ["中际旭创"],
+                                      "period": "FY", "reason": "r"}})
+    assert "营业收入" in st["answer"]            # 要点来自检索命中块
+    assert st["verdict"] == "pass"
+    assert st["citations"] == ["中际旭创_2025FY"]  # 年份对：不是 2024FY
 
 
 def test_period_aware_retrieval(app):

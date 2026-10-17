@@ -70,6 +70,13 @@ _METRIC_WORDS = ("多少", "几个点", "占比", "增长率", "率", "每股",
 _COMPARE_WORDS = ("对比", "比较", "vs", "VS", "哪家", "谁强", "差异")
 
 
+def query_years(query: str) -> set[str]:
+    """query 中出现的年份（20xx）。doc_scope 的年份维度：期间过滤此前
+    只有类型（Q1/H1/FY）没有年份——三年语料实测问 2025Q1 时 2024Q1/
+    2026Q1 的块混排进答案。"""
+    return {y for y in re.findall(r"(20\d{2})", query)}
+
+
 # ── 查询理解 ────────────────────────────────────────────
 
 
@@ -224,9 +231,11 @@ def make_nodes(corpus: Corpus):
         # exact 落空回退未过滤结果 = 拿年报答一季报，v0.4 实测），限定
         # doc 集合重查一次。
         if period:
+            years = query_years(state["query"])
             allowed = {d for d, doc in corpus.docs.items()
                        if (not companies or doc.company in companies)
-                       and period in doc.period}
+                       and period in doc.period
+                       and (not years or doc.period[:4] in years)}
             if allowed:
                 scoped = corpus.search(eff, k=TOP_K, doc_filter=filt, doc_scope=allowed)
                 if scoped:
@@ -275,10 +284,12 @@ def make_nodes(corpus: Corpus):
         sub_text = re.sub(r"\s+", " ", sub_text).strip() or state["query"]
         per: dict[str, list] = {}
         k_each = max(4, TOP_K // len(companies))
+        years = query_years(state["query"])
         for comp in companies:
             scope = {d for d, doc in corpus.docs.items()
                      if (not comp or doc.company == comp)
-                     and (not period or period in doc.period)}
+                     and (not period or period in doc.period)
+                     and (not years or doc.period[:4] in years)}
             hits = corpus.search(expand_query(sub_text), k=k_each,
                                  doc_filter=comp, doc_scope=scope or None)
             if hits:
@@ -340,14 +351,36 @@ def make_nodes(corpus: Corpus):
         q_toks = set(word_tokens(state["query"])) - {"怎么样", "怎么看", "如何", "观点", "总结", "摘要"}
         # 域词守卫：遍历前6命中，找到「分数达标 且 ≥2 词元重叠」的第一个；
         # 第一名可能是无关键词的偶然块（字级 trigram 撞出来的分数）。
-        for h in corpus.search(expand_query(state["query"]), k=6, doc_filter=filt):
+        # 目标检索带期间+年份范围：三年语料下无范围检索会被旧年报块
+        # 抢占（实测「2025 年报」选中 2024FY）
+        years = query_years(state["query"])
+        scope = {d for d, doc in corpus.docs.items()
+                 if (not companies or doc.company in companies)
+                 and (not u.get("period") or u["period"] in doc.period)
+                 and (not years or doc.period[:4] in years)} or None
+        hits = corpus.search(expand_query(state["query"]), k=6,
+                             doc_filter=filt, doc_scope=scope)
+        for h in hits:
             overlap = len(q_toks & set(word_tokens(h.chunk.text[:300])))
             if (h.score >= 0.028 and overlap >= 2) or overlap >= 3:
                 target = h.chunk.doc_id
                 break
         if target is None:
             return refuse(state)
-        doc_chunks = corpus.chunks_of(target, limit=12)
+        # 要点种子双检索：目标选择的命中块 + 内容词检索（「总结/年报」
+        # 词元天然锚不中经营分析——种子查询用财务关键词，范围锁定目标
+        # 文档）。长报告（184-236 页）的经营分析在第 10 页后，文档头部
+        # 12 块是封面/董事名录（茅台 102 页实测要点为空）
+        company0 = (companies or [""])[0]
+        probe = expand_query(f"{company0} 主要会计数据 营业收入 净利润 同比")
+        seed_hits = corpus.search(probe, k=6, doc_filter=filt,
+                                  doc_scope={target})
+        seed = [h.chunk for h in seed_hits][:6] \
+            + [h.chunk for h in hits if h.chunk.doc_id == target][:6]
+        seen_ids = set()
+        seed = [c for c in seed if not (c.chunk_id in seen_ids or seen_ids.add(c.chunk_id))]
+        doc_chunks = seed + [c for c in corpus.chunks_of(target, limit=12)
+                             if c.chunk_id not in seen_ids]
         head = corpus.docs[target]
         key_lines = []
         for c in doc_chunks:
@@ -397,8 +430,10 @@ def make_nodes(corpus: Corpus):
             # 多公司 understanding 且模型没指定公司 → 逐家检索交错合并
             # （对比题的正确语义；单公司才继承为默认过滤）
             targets = [comp] if comp else (u_comps or [""])
+            years = query_years(state["query"])
             scope_common = {d for d, doc in corpus.docs.items()
-                            if not period or period in doc.period} or None
+                            if (not period or period in doc.period)
+                            and (not years or doc.period[:4] in years)} or None
             per: dict[str, list] = {}
             for c in targets:
                 scope = ({d for d in scope_common
@@ -526,6 +561,10 @@ def build_graph(corpus: Corpus):
     g.add_edge("understand", "route")
 
     def after_route(state: GraphState) -> str:
+        # 期间守卫已在 route 内写明具体原因（缺哪年、现有哪些期间），
+        # 直达 END——此前 other→refuse 会用通用文案覆盖掉它
+        if state.get("verdict") == "refused":
+            return END
         r = state.get("route", "metric")
         # v0.6：llm 模式下 metric/compare 进 Agent 环（模型自主检索）；
         # heuristic 模式走固定管线（兜底 + 回归基线）
@@ -539,7 +578,8 @@ def build_graph(corpus: Corpus):
                              "summarize_doc": "summarize_doc",
                              "decompose": "decompose",
                              "agent_research": "agent_research",
-                             "refuse": "refuse"})
+                             "refuse": "refuse",
+                             END: END})
 
     g.add_edge("retrieve", "grade_docs")
     g.add_edge("decompose", "grade_docs")    # 多跳合并后走同一条对账路径
