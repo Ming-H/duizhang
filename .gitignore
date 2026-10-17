@@ -5,7 +5,8 @@ duizhang.db
 .pytest_cache/
 .DS_Store
 
-data/
+data/*
+!data/中际旭创/
 *.idx.pkl
 duizhang.db-wal
 duizhang.db-shm
