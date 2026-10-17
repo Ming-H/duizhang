@@ -68,6 +68,20 @@ _METRIC_WORDS = ("多少", "几个点", "占比", "增长率", "率", "每股",
                  "营收", "收入", "利润", "净利", "毛利", "现金流", "订单", "在手", "手持",
                  "亿元", "万元", "同比", "环比", "预告")
 _COMPARE_WORDS = ("对比", "比较", "vs", "VS", "哪家", "谁强", "差异")
+# 跨期趋势：财报分析最高频的真实问法（「最近几个季度…趋势」）；
+# 投资建议类问题也归 trend——用数据回答，不拒答不瞎答
+_TREND_WORDS = ("趋势", "走势", "最近几", "近几", "几个季度", "几个报告期",
+                "逐季", "逐年", "季度营收", "季度利润")
+_PERIOD_MONTH = {"Q1": 3, "H1": 6, "H1E": 7, "Q3": 9, "Q3E": 10, "FY": 12}
+_re_digits = re.compile(r"\d")
+
+
+def _period_key(period: str) -> tuple[int, int]:
+    """报告期 → (年, 月) 时间序键。字典序会把 H1 排在 Q1 前
+    （H<Q），时间上是错的（Q1=3月，H1=6月）——后缀必须映射月份。"""
+    year = int(period[:4]) if period[:4].isdigit() else 0
+    suffix = period[4:]
+    return (year, _PERIOD_MONTH.get(suffix, 0))
 
 
 def query_years(query: str) -> set[str]:
@@ -103,6 +117,47 @@ def page_evidence(hits, corpus, top_n: int = 4, window: int = 2,
     return out
 
 
+def trend_skeleton(hits, corpus=None) -> str:
+    """趋势答案的确定性骨架：每期营收句+净利句 + 该期引用，按时间
+    升序。LLM 直生成多期长答案实测自相矛盾（0.8b 编造报告期/修正
+    推断螺旋）——引用必须 100% 真实，骨架交给代码。候选池 = 该期
+    全部命中块 + 首命中所在页的全页块（检索常被节标题块占位，钱在
+    同页兄弟块里——实测 2026H1「主要会计数据」标题块挤掉营收行）。"""
+    import re as _re
+    by_doc: dict = {}
+    for h in hits:
+        ch = h.chunk if hasattr(h, "chunk") else h
+        by_doc.setdefault(ch.doc_id, []).append(ch)
+    lines = []
+    for doc_id, chs in by_doc.items():            # 插入序 = 时间升序
+        pool = list(chs)
+        get_page = getattr(corpus, "chunks_page", None) if corpus else None
+        if get_page and chs[0].page:
+            pool += [c for c in get_page(doc_id, chs[0].page)
+                     if c.chunk_id not in {x.chunk_id for x in pool}]
+        def pick(require: str) -> str:
+            best_s, best_sc = "", -99
+            for c in pool:
+                for sent in ans._sentences(c.text):
+                    if not _re.search(r"\d", sent) or require not in sent:
+                        continue
+                    score = 2
+                    if any(w in sent for w in ("同比", "增减", "较上年", "%")):
+                        score += 2
+                    if any(w in sent for w in ("终止经营", "少数股东", "按所有权",
+                                                "净亏损以", "综合收益")):
+                        score -= 5               # 利润表表头/权益变动残渣
+                    if score > best_sc:
+                        best_s, best_sc = sent, score
+            return best_s if best_sc > 0 else ""
+
+        picked = [p for p in (pick("营业收入"), pick("净利润")) if p]
+        if picked:
+            lines.append(f"· {doc_id}：" +
+                         "；".join(picked) + f" {pool[0].citation}")
+    return "\n".join(lines)
+
+
 # ── 查询理解 ────────────────────────────────────────────
 
 
@@ -118,6 +173,8 @@ def rule_understand(query: str, corpus) -> dict:
     hints = period_hints(query)
     if len(companies) >= 2 and any(w in query for w in _COMPARE_WORDS):
         intent = "compare"
+    elif any(w in query for w in _TREND_WORDS):
+        intent = "trend"
     elif any(w in query for w in _SUMMARY_WORDS):
         intent = "summary"
     elif any(w in query for w in _METRIC_WORDS):
@@ -170,10 +227,13 @@ def make_nodes(corpus: Corpus):
                     "period 按财报日历（一季度/一季报/Q1→Q1，半年度/中报/二季度→H1，"
                     "三季→Q3，年度/年报/四季度→FY，未提及则空串）；"
                     "intent：metric=问具体数字/指标/事实/原因/归因（需要检索证据句），"
+                    "trend=跨期趋势/多期对比（最近几个季度/近几年的指标变化；"
+                    "问投资建议也归 trend，用数据回答），"
                     "summary=要整体概览/总结全篇，compare=对比多家公司，"
-                    "other=闲聊或超纲。注意「XX变动的原因」是 metric 不是 summary。", q)
+                    "other=闲聊或超纲。注意「XX变动的原因」是 metric 不是 summary，"
+                    "「最近几个季度的趋势」是 trend 不是 summary。", q)
                 intent = r.get("intent", "metric")
-                if intent not in ("metric", "summary", "compare", "other"):
+                if intent not in ("metric", "summary", "compare", "trend", "other"):
                     # 宽松归一：常思模型偶尔回中文意图（glm-5.3 实测
                     # 「对比营收」）——按语义归类，不能一律掉到 metric
                     raw_intent = str(intent)
@@ -208,6 +268,9 @@ def make_nodes(corpus: Corpus):
             if (u.get("intent") == "metric" and len(u.get("companies") or []) >= 2
                     and any(w in q for w in _COMPARE_WORDS)):
                 u["intent"] = "compare"
+            # 趋势守卫：0.8b 实测把趋势问句判成 summary（单文档残渣）
+            if u.get("intent") == "summary" and any(w in q for w in _TREND_WORDS):
+                u["intent"] = "trend"
             # 公司名纠偏：LLM 幻觉出语料外的公司时，用规则命中的兜底
             known = {d.company for d in corpus.docs.values() if d.company}
             rule_u = rule_understand(q, corpus)
@@ -347,6 +410,41 @@ def make_nodes(corpus: Corpus):
                                     if c.num_notes else "") for c in cs)
                 parts.append(f"[{doc_id} 第{page}页]\n{body}")
             evidence = "\n\n".join(parts)
+            # 趋势题：确定性骨架 + LLM 仅做归纳（0.8b 直生成多期长答案
+            # 实测自相矛盾——见 trend_skeleton 注释）
+            if (state.get("understanding") or {}).get("intent") == "trend":
+                skeleton = trend_skeleton(hits, corpus)
+                if not skeleton:
+                    return {**state, "answer": "", "verdict": "refused",
+                            "trace": ["generate:trend-no-facts→refuse"]}
+                summary = ""
+                try:
+                    summary = llmx.chat_text(
+                        "只依据给定的逐期财务数据，用两三句话归纳营收与"
+                        "净利润的趋势方向（上升/放缓/波动）。不要出现任何"
+                        "数字——包括换算后的量级。",
+                        skeleton, max_tokens=512).strip()
+                except Exception:
+                    pass
+                if _re_digits.search(summary):   # 数字禁令由代码执行
+                    summary = ""
+                body = skeleton
+                if summary:
+                    body = f"{body}\n\n趋势归纳：{summary.strip()}"
+                body += "\n（以上为财报事实梳理，不构成投资建议）"
+                cited = list(dict.fromkeys(
+                    h.chunk.citation for h in hits if h.chunk.citation))
+                # verify 证据池与骨架候选池同源（每期首命中页的全页块）：
+                # 骨架数字常来自页内兄弟块，而 hits 首块可能只是节标题——
+                # 引用串相同（同页）但正文没数字，文本级重叠会崩（实测 0.119）
+                ev, seen_docs = [], set()
+                for h in hits:
+                    if h.chunk.doc_id in seen_docs:
+                        continue
+                    seen_docs.add(h.chunk.doc_id)
+                    ev += corpus.chunks_page(h.chunk.doc_id, h.chunk.page)
+                return {**state, "answer": body, "citations": cited,
+                        "evidence": ev or hits, "trace": ["generate:trend"]}
             try:
                 out = llmx.chat_text(
                     "你是财报问答助手。只依据给定证据回答；每个事实句末尾必须"
@@ -553,6 +651,29 @@ def make_nodes(corpus: Corpus):
         return {**state, "hits": hits_out, "effective_query": eff,
                 "trace": [f"agent:{n_steps}步/{n_calls}次search/{len(pool)}块证据/{stopped}"]}
 
+    def trend_research(state: GraphState) -> GraphState:
+        """跨期研究（v0.6.2）：遍历该公司报告期（时间序，最近 6 期）、
+        每期 doc_scope 检索关键指标、按时间升序合并——确定性遍历，
+        双模式共用；比让 Agent 自己逐期调工具可靠（0.8b 会漏期/死循环）。
+        出口照常 generate→verify，多期不豁免闸门。"""
+        u = state.get("understanding") or rule_understand(state["query"], corpus)
+        companies = [c for c in (u.get("companies") or []) if c] or [""]
+        quarterly = "季" in state["query"]          # 季度问法 → 季度粒度报告期
+        periods = sorted(
+            (d for d, doc in corpus.docs.items()
+             if doc.company in companies
+             and (not quarterly or any(doc.period.endswith(sfx)
+                                       for sfx in ("Q1", "H1", "Q3", "H1E")))),
+            key=lambda d: _period_key(corpus.docs[d].period))[-6:]
+        hits: list = []
+        for d in periods:                           # 时间升序：趋势叙事方向
+            # 锚定「主要会计数据」节——一行式营收/净利润在那里；
+            # 泛查会捞到利润表深处的碎片（实测终止经营表头残渣）
+            hits += corpus.search("主要会计数据 " + expand_query("营业收入 净利润"),
+                                  k=5, doc_filter=companies[0], doc_scope={d})
+        return {**state, "hits": hits,
+                "trace": [f"trend:{len(periods)}期"]}
+
     def verify_citations(state: GraphState) -> GraphState:
         a = state.get("answer", "")
         # 证据池用页级集合（同页窗口块 citation 串相同，被引池自动扩到
@@ -570,14 +691,15 @@ def make_nodes(corpus: Corpus):
         return refuse({**state, "trace": [f"verify:degraded({cov})→refuse"]})
 
     return (understand, route, retrieve, grade_docs, rewrite_query, generate,
-            decompose, summarize_doc, refuse, verify_citations, agent_research)
+            decompose, summarize_doc, refuse, verify_citations, agent_research,
+            trend_research)
 
 
 # ── 条件边 ──────────────────────────────────────────────
 
 
 def build_graph(corpus: Corpus):
-    understand, route, retrieve, grade, rewrite, generate, decompose, summarize, refuse, verify, agent = make_nodes(corpus)
+    understand, route, retrieve, grade, rewrite, generate, decompose, summarize, refuse, verify, agent, trend = make_nodes(corpus)
 
     g = StateGraph(GraphState)
 
@@ -592,6 +714,7 @@ def build_graph(corpus: Corpus):
     g.add_node("refuse", refuse)
     g.add_node("verify_citations", verify)
     g.add_node("agent_research", agent)
+    g.add_node("trend_research", trend)
 
     g.add_edge(START, "understand")
     g.add_edge("understand", "route")
@@ -606,6 +729,8 @@ def build_graph(corpus: Corpus):
         # heuristic 模式走固定管线（兜底 + 回归基线）
         if state.get("mode") == "llm" and r in ("metric", "compare"):
             return "agent_research"
+        if r == "trend":
+            return "trend_research"
         return {"metric": "retrieve", "summary": "summarize_doc",
                 "compare": "decompose", "other": "refuse"}[r]
 
@@ -614,6 +739,7 @@ def build_graph(corpus: Corpus):
                              "summarize_doc": "summarize_doc",
                              "decompose": "decompose",
                              "agent_research": "agent_research",
+                             "trend_research": "trend_research",
                              "refuse": "refuse",
                              END: END})
 
@@ -634,6 +760,7 @@ def build_graph(corpus: Corpus):
 
     g.add_edge("rewrite_query", "retrieve")     # 纠错环：改写后重检索
     g.add_edge("agent_research", "generate")    # Agent 环收集证据后直接生成
+    g.add_edge("trend_research", "generate")    # 跨期证据汇合后同一生成路径
     g.add_edge("generate", "verify_citations")
     g.add_edge("summarize_doc", END)
     g.add_edge("refuse", END)

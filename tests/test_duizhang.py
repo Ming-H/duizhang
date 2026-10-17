@@ -243,6 +243,66 @@ def test_generate_stores_page_evidence_for_verify(monkeypatch):
     assert st.get("evidence") and len(st["evidence"]) == 2      # 含兄弟块
 
 
+def test_trend_intent_and_period_order():
+    """trend 意图：趋势词触发、优先级低于 compare；报告期按时间序
+    （period 后缀映射月份——字典序会把 H1 排在 Q1 前，时间上是错的）；
+    「季度」类问法过滤季度粒度。"""
+    from duizhang.graph import _period_key, rule_understand
+    u = rule_understand("中际旭创最近几个季度营收的趋势", _MiniCorpus())
+    assert u["intent"] == "trend"
+    u2 = rule_understand("对比欧科亿和海伦哲 2026 一季报营收", _MiniCorpus())
+    assert u2["intent"] == "compare"                       # compare 更具体，优先
+    assert _period_key("2026Q1") < _period_key("2026H1") < _period_key("2026Q3") \
+        < _period_key("2026FY") < _period_key("2027Q1")
+
+
+def test_understand_trend_guard(app, monkeypatch):
+    """0.8b 实测把趋势问句判成 summary——守卫纠正（与 compare 守卫同款）。"""
+    from duizhang import llm as llmx
+    from duizhang.graph import make_nodes
+    understand = make_nodes(_MiniCorpus())[0]
+    monkeypatch.setattr(llmx, "llm_enabled", lambda: True)
+    monkeypatch.setattr(llmx, "chat_json", lambda s, u, **kw: {
+        "intent": "summary", "companies": ["欧科亿"], "period": "",
+        "reason": "概览"})
+    st = understand(new_state("欧科亿最近几个季度营收的趋势", "llm"))
+    assert st["understanding"]["intent"] == "trend"
+
+
+def test_trend_research_sweeps_periods():
+    """跨期研究：遍历该公司报告期（最近6期、时间升序）、每期 doc_scope
+    检索、合并进 hits——趋势问题从单文档残渣变为多期证据。"""
+
+    class TrendCorpus:
+        def __init__(self):
+            from duizhang.schemas import Doc, Retrieved
+            self.docs = {f"中际旭创_{p}": Doc(f"中际旭创_{p}", "中际旭创",
+                                              p, "报告", "x", 10)
+                         for p in ("2024Q1", "2024H1", "2025Q1", "2025H1",
+                                   "2026Q1", "2026H1", "2025FY", "2024FY")}
+            self._R = Retrieved
+
+        def search(self, q, k=8, doc_filter="", doc_scope=None):
+            from duizhang.schemas import Chunk
+            out = []
+            for i, d in enumerate(sorted(doc_scope or [])):
+                out.append(self._R(chunk=Chunk(f"{d}#c", d, 8, 0,
+                                               f"{d} 营业收入 100 同比增长"),
+                                   score=0.1, rank=i + 1))
+            return out[:k]
+
+    from duizhang.graph import make_nodes
+    trend = make_nodes(TrendCorpus())[11]
+    st = trend({**new_state("中际旭创最近几个季度营收趋势", "heuristic"),
+                "understanding": {"intent": "trend", "companies": ["中际旭创"],
+                                  "period": "", "reason": "r"}})
+    docs = [h.chunk.doc_id for h in st["hits"]]
+    # 季度粒度、最近 6 期、时间升序（2024Q1 → 2026H1，FY 被季度问法排除）
+    assert docs == ["中际旭创_2024Q1", "中际旭创_2024H1", "中际旭创_2025Q1",
+                    "中际旭创_2025H1", "中际旭创_2026Q1", "中际旭创_2026H1"]
+    assert any(t.startswith("trend:") for t in st["trace"])
+
+
 # ── 查询理解（understand 节点） ─────────────────────────
 
 
