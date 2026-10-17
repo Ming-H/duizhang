@@ -204,6 +204,17 @@ def strip_boilerplate(pages: list[str], page_count: int) -> list[str]:
             for pt in pages]
 
 
+def keep_block(block: str, is_table: bool) -> bool:
+    """空表头过滤：表格块内「≥3 位且非年份」的数字少于 2 个的是纯列名
+    块（含「项目 2026年半年度 2025年半年度」这类纯年份列头——年份是
+    列标签不是数据），无证据价值、纯检索噪声——落库前丢弃。"""
+    if not is_table:
+        return True
+    nums = [m for m in re.findall(r"\d{3,}", block)
+            if not re.fullmatch(r"20\d{2}", m)]
+    return len(nums) >= 2
+
+
 def ingest_file(path: str | Path) -> tuple[Doc, list[Chunk]]:
     company, period, kind = parse_filename(path)
     doc_id = f"{company}_{period}"
@@ -221,7 +232,7 @@ def ingest_file(path: str | Path) -> tuple[Doc, list[Chunk]]:
         if len(ptext.strip()) < 20:
             continue
         for seq, (block, is_table) in enumerate(chunk_page(ptext)):
-            if len(block.strip()) < 15:
+            if len(block.strip()) < 15 or not keep_block(block, is_table):
                 continue
             notes = normalize_numbers(block)
             chunks.append(Chunk(

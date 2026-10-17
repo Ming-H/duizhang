@@ -77,6 +77,32 @@ def query_years(query: str) -> set[str]:
     return {y for y in re.findall(r"(20\d{2})", query)}
 
 
+def page_evidence(hits, corpus, top_n: int = 4, window: int = 2,
+                  cap: int = 20) -> list:
+    """页级证据组装（small-to-big 最小形态，DESIGN-v0.6 §5.3）：
+    top 命中去重页 → 同页块按 seq → 命中块为中心的 ±2 窗口 → 总量
+    硬顶。半句的后续与同页表格行由此进入生成上下文（top-8 每页最多
+    1 块，兄弟块从不自动在场——实测证伪「相邻块共召回」）。"""
+    out, seen_pages = [], set()
+    chunks_page = getattr(corpus, "chunks_page", None)
+    for h in hits[:top_n]:
+        key = (h.chunk.doc_id, h.chunk.page)
+        if key in seen_pages:
+            continue
+        seen_pages.add(key)
+        if chunks_page is None:          # 语料对象无页查询能力 → 命中块自身
+            out.append(h.chunk)
+            continue
+        siblings = chunks_page(*key)
+        idx = next((i for i, c in enumerate(siblings)
+                    if c.chunk_id == h.chunk.chunk_id), 0)
+        for c in siblings[max(0, idx - window): idx + window + 1]:
+            if len(out) >= cap:
+                return out
+            out.append(c)
+    return out
+
+
 # ── 查询理解 ────────────────────────────────────────────
 
 
@@ -305,15 +331,22 @@ def make_nodes(corpus: Corpus):
 
     def generate(state: GraphState) -> GraphState:
         hits = state["hits"]
+        # 页级证据（small-to-big）：命中块 ±2 窗口的兄弟块一并进入
+        # 生成与校验的视野——检索精度不动，上下文在生成侧补全
+        page_chunks = page_evidence(hits, corpus)
         fallback: list[str] = []
         if state["mode"] == "llm" and llmx.llm_enabled():
-            # 证据带数字归一化注释（「≈4.19亿」是「多少亿」问法的命中通道）；
-            # 财报 PDF 表格抽取常见数字断裂，注释能补上量级锚点
-            evidence = "\n\n".join(
-                f"[{h.chunk.doc_id} 第{h.chunk.page}页] {h.chunk.text[:500]}"
-                + (f"（数字参考：{'；'.join(h.chunk.num_notes[:3])}）"
-                   if h.chunk.num_notes else "")
-                for h in hits[:8])
+            # 证据按页聚合（页首标注），块序拼接；数字归一化注释随块
+            by_page: dict[tuple, list] = {}
+            for c in page_chunks:
+                by_page.setdefault((c.doc_id, c.page), []).append(c)
+            parts = []
+            for (doc_id, page), cs in by_page.items():
+                body = "\n".join(
+                    c.text[:500] + (f"（数字参考：{'；'.join(c.num_notes[:3])}）"
+                                    if c.num_notes else "") for c in cs)
+                parts.append(f"[{doc_id} 第{page}页]\n{body}")
+            evidence = "\n\n".join(parts)
             try:
                 out = llmx.chat_text(
                     "你是财报问答助手。只依据给定证据回答；每个事实句末尾必须"
@@ -329,7 +362,7 @@ def make_nodes(corpus: Corpus):
                         h.chunk.citation for h in hits[:8]
                         if h.chunk.citation in out))
                     return {**state, "answer": out, "citations": cited,
-                            "trace": ["generate:llm"]}
+                            "evidence": page_chunks, "trace": ["generate:llm"]}
                 # LLM 判无据 → 降级抽取式（永远有真凭实据），而非拒答——
                 # 与 verify 的「降级而非失败」同一纪律
                 fallback = ["generate:llm-no-evidence→extractive"]
@@ -337,6 +370,7 @@ def make_nodes(corpus: Corpus):
                 fallback = ["generate:llm→fallback"]
         body, cited = ans.extractive_answer(state, hits)
         return {**state, "answer": body, "citations": cited,
+                "evidence": page_chunks,
                 "trace": fallback + ["generate:extractive"]}
 
     # 摘要守卫（双条件或）：RRF 分 ≥0.028 = 词字双轨一致命中；或强域词重叠
@@ -521,7 +555,9 @@ def make_nodes(corpus: Corpus):
 
     def verify_citations(state: GraphState) -> GraphState:
         a = state.get("answer", "")
-        verdict, cov = ans.verify(a, state.get("hits", []))
+        # 证据池用页级集合（同页窗口块 citation 串相同，被引池自动扩到
+        # 整页窗口）——跨块半句不再误降级
+        verdict, cov = ans.verify(a, state.get("evidence") or state.get("hits", []))
         if verdict == "pass":
             return {**state, "verdict": "pass", "trace": [f"verify:pass({cov})"]}
         if verdict == "refused":

@@ -189,6 +189,60 @@ def test_retrieve_year_scope():
     assert {h.chunk.doc_id for h in out["hits"]} == {"中际旭创_2025Q1"}
 
 
+def test_ingest_drops_empty_table_headers():
+    """空表头块（纯列名、≥3 位数字少于 2 个）是检索噪声（实测 17% 的
+    表格块）——落库前丢弃；有数据的表格块与正文块不受影响。"""
+    from duizhang.ingest import keep_block
+    assert keep_block("项目 2026年半年度 2025年半年度", True) is False   # 空表头
+    assert keep_block("营业收入 644,051,473.82 301,672,910.35", True) is True
+    assert keep_block("这是一段正常正文，含有句号。", False) is True
+
+
+def test_page_evidence_window():
+    """页级证据组装：top-4 命中去重页 → 同页 ±2 窗口（命中块中心，
+    ≤5 块/页）→ 总量硬顶 20。半句的后续与同页表格行由此进入上下文
+    （top-8 每页最多 1 块，兄弟块从不自动在场——实测）。"""
+
+    class PageCorpus:
+        def __init__(self):
+            from duizhang.schemas import Chunk
+            self.pages = {("d", 5): [Chunk(f"d#p5#{i}", "d", 5, i,
+                                           f"第5页第{i}句。") for i in range(8)],
+                          ("d", 9): [Chunk(f"d#p9#{i}", "d", 9, i,
+                                           f"第9页第{i}句。") for i in range(3)]}
+
+        def chunks_page(self, doc_id, page):
+            return self.pages.get((doc_id, page), [])
+
+    from duizhang.graph import page_evidence
+    hits = [_hit("d#p5#4", "d", 5, 4, "第5页第4句。", 1),
+            _hit("d#p9#1", "d", 9, 1, "第9页第1句。", 2)]
+    chunks = page_evidence(hits, PageCorpus())
+    ids = [c.chunk_id for c in chunks]
+    assert ids == ["d#p5#2", "d#p5#3", "d#p5#4", "d#p5#5", "d#p5#6",  # ±2 窗口
+                   "d#p9#0", "d#p9#1", "d#p9#2"]                        # 全页仅3块
+
+
+def test_generate_stores_page_evidence_for_verify(monkeypatch):
+    """generate 把页级证据写进 state['evidence']，verify 闸门用它做
+    证据池——同页窗口块的 citation 串相同（doc+页码），被引池自动
+    扩到整页窗口，跨块半句不再误降级。"""
+
+    class EvidCorpus:
+        def chunks_page(self, doc_id, page):
+            from duizhang.schemas import Chunk
+            return [Chunk("d#p5#1", "d", 5, 1, "兄弟块：同比增长 50%。"),
+                    Chunk("d#p5#2", "d", 5, 2, "命中块本块。")]
+
+    from duizhang import llm as llmx
+    from duizhang.graph import make_nodes
+    generate = make_nodes(EvidCorpus())[5]
+    monkeypatch.setattr(llmx, "llm_enabled", lambda: False)
+    st = generate({**new_state("d 营收", "heuristic"),
+                   "hits": [_hit("d#p5#2", "d", 5, 2, "命中块本块。", 1)]})
+    assert st.get("evidence") and len(st["evidence"]) == 2      # 含兄弟块
+
+
 # ── 查询理解（understand 节点） ─────────────────────────
 
 

@@ -124,12 +124,16 @@ def citation_coverage(answer: str, hits: list[Retrieved]) -> float:
         return 0.0
     sents = [s for s in all_sents if re.search(r"\d", re.sub(r"20\d{2}", "", s))] \
         or all_sents
-    cited = [h for h in hits if h.chunk.citation in answer]
+    # 兼容 Retrieved 与裸 Chunk（v0.6.1 页级证据是 Chunk 列表）
+    def _chunk(h):
+        return h.chunk if hasattr(h, "chunk") else h
+
+    cited = [h for h in hits if _chunk(h).citation in answer]
     pool = cited or hits[:4]
     companies = tuple(dict.fromkeys(
-        h.chunk.doc_id.split("_", 1)[0] for h in pool))
+        _chunk(h).doc_id.split("_", 1)[0] for h in pool))
     mchars = frozenset("".join(companies))
-    evidence = " ".join(f"{h.chunk.text} {' '.join(h.chunk.num_notes)}"
+    evidence = " ".join(f"{_chunk(h).text} {' '.join(_chunk(h).num_notes)}"
                         for h in pool)
     etoks = _content_tokens(word_tokens(evidence), extra_meta=companies,
                             meta_chars=mchars)
@@ -149,7 +153,8 @@ def has_citation(answer: str, hits: list[Retrieved] | None = None) -> bool:
     期间后缀），正则永远漏判。"""
     if re.search(r"\[[^\]]+第\d+页\]|\[[^\]]+_\d{4}[A-Z0-9]*\]", answer):
         return True
-    return bool(hits) and any(h.chunk.citation in answer for h in hits)
+    return bool(hits) and any(
+        (h.chunk if hasattr(h, "chunk") else h).citation in answer for h in hits)
 
 
 COVERAGE_THRESHOLD = 0.45   # 抽取式天然高；LLM 生成低于此值说明在编

@@ -81,6 +81,8 @@ class GraphState(TypedDict, total=False):
     # rewrite 节点
     effective_query: str               # 实际用于检索的 query（含改写）
     rewritten: bool
+    # generate 节点（v0.6.1：页级证据，verify 闸门的证据池）
+    evidence: list                     # 命中块 ±2 窗口的同页块集
     # generate / summarize / refuse 节点
     answer: str
     citations: list[str]

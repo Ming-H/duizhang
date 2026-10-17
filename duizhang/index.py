@@ -69,6 +69,16 @@ class Corpus:
         return [Chunk(r[0], r[1], r[2], r[3], r[4], bool(r[5]), json.loads(r[6]))
                 for r in rows]
 
+    def chunks_page(self, doc_id: str, page: int) -> list[Chunk]:
+        """页级证据组装用：某文档某页的全部块，按页内序号排。"""
+        import json
+        rows = self._con.execute(
+            "SELECT chunk_id, doc_id, page, seq, text, is_table, num_notes "
+            "FROM chunks WHERE doc_id=? AND page=? ORDER BY seq",
+            (doc_id, page)).fetchall()
+        return [Chunk(r[0], r[1], r[2], r[3], r[4], bool(r[5]), json.loads(r[6]))
+                for r in rows]
+
     def counts(self) -> tuple[int, int]:
         n_docs = len(self.docs)
         n_chunks = self._con.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
