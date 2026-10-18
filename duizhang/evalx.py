@@ -17,7 +17,8 @@ from pathlib import Path
 
 DATASET_DIR = Path(__file__).resolve().parents[1] / "evals"
 DATASETS = {"default": DATASET_DIR / "dataset.json",
-            "agent": DATASET_DIR / "dataset-agent.json"}
+            "agent": DATASET_DIR / "dataset-agent.json",
+            "innolight": DATASET_DIR / "dataset-innolight.json"}
 
 
 def load_dataset(name: str = "default") -> list[dict]:

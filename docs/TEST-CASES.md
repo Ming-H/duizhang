@@ -99,6 +99,7 @@ DZ_DB=/tmp/dz_eval/t.db python -m duizhang.cli eval --mode llm               # �
 | ② | heuristic · agent（8 题） | 1.00 / 1.00 / 1.00 |
 | ③ | llm · agent | **1.00 / 1.00 / 1.00** |
 | ④ | llm · default | ≥ 0.875 / 0.875 / 1.00 |
+| ⑤ | llm · innolight（14 题真值集，工作库上跑） | ≥ 0.85（详见 RAG-EVAL-CASES.md） |
 
 > 注：评估集基于 samples 三家公司；在 中际旭创 工作库上跑会因缺文档判 ✗，
 > 属预期非 bug。陷阱题两类（2030 未来期间 / 天气）在任何模式下必须拒答。

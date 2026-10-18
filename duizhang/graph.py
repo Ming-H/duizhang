@@ -203,7 +203,7 @@ def period_hints(query: str) -> list[str]:
     （2026-10-14 全量库实测：问 2026 半年度，命中 2025FY:5 / 2026H1E:2）。
     季度口语映射按财报日历：二季度→H1（半年报）、四季度→FY（年报）。
     """
-    if any(w in query for w in ("半年度", "半年报", "中报", "二季度", "上半年")):
+    if any(w in query for w in ("半年度", "半年报", "中报", "二季度", "上半年", "H1")):
         return ["H1"]
     if "一季" in query or "Q1" in query:
         return ["Q1"]
@@ -465,10 +465,14 @@ def make_nodes(corpus: Corpus):
                     "抽取，数字可能分行或断裂——可把相关数字碎片组织成答案"
                     "并如实标注来源，但禁止编造不在证据里的数字。仔细区分"
                     "指标本身的数值区间与「同比增加/将增加」的变动幅度，"
-                    "引用问题所问的那个。确实无任何相关数字才回答"
-                    "「原文中没有找到依据」。",
+                    "引用问题所问的那个。问「净利润」而未提扣非时，默认指"
+                    "归属于上市公司股东的净利润（非扣非口径）。确实无任何"
+                    "相关数字才回答「原文中没有找到依据」。",
                     f"问题：{state['query']}\n\n证据：\n{evidence}")
-                if "没有找到依据" not in out:
+                no_evidence = any(p in out for p in (
+                    "没有找到依据", "未找到依据", "未找到相关", "无法从",
+                    "无法确定", "无法回答")) or len(out.strip()) < 15
+                if not no_evidence:
                     cited = list(dict.fromkeys(
                         h.chunk.citation for h in hits[:8]
                         if h.chunk.citation in out))
@@ -571,7 +575,9 @@ def make_nodes(corpus: Corpus):
             if not q:
                 return "[]"
             if q not in agent_queries:
-                agent_queries.append(q)
+                agent_queries.append(expand_query(q))   # 扩展后的词：
+                # 模型常用口语词（营收/revenue），抽取式打分要能对上
+                # 证据里的财报术语（营业收入）——实测裸词零重叠致空手拒答
             # 多公司 understanding 且模型没指定公司 → 逐家检索交错合并
             # （对比题的正确语义；单公司才继承为默认过滤）
             targets = [comp] if comp else (u_comps or [""])
