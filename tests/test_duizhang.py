@@ -243,6 +243,44 @@ def test_generate_stores_page_evidence_for_verify(monkeypatch):
     assert st.get("evidence") and len(st["evidence"]) == 2      # 含兄弟块
 
 
+def test_extractive_expands_query_terms():
+    """抽取式打分必须用扩展后的检索词：query 口语词（营收/revenue）与
+    证据财报术语（营业总收入）零词元重叠 → 空手拒答（heuristic
+    innolight 实测 T4 两题 refused）。"""
+    from duizhang.answer import extractive_answer
+    from duizhang.schemas import new_state
+    h = _hit("c1", "中际旭创_2026H1", 55, 0,
+             "一、营业总收入 41,777,861,795.03 14,789,074,837.80", 1)
+    st = new_state("中际旭创 2026 半年度营收多少", "heuristic")
+    body, _ = extractive_answer(st, [h])
+    assert "41,777,861,795" in body
+
+
+def test_trend_skeleton_mode_independent():
+    """trend 确定性骨架不依赖 LLM——heuristic 模式同样输出逐期骨架
+    （此前骨架分支被 llm 条件包裹，heuristic 趋势题退化为普通抽取式，
+    innolight 实测 doc=N）。"""
+
+    class TrendCorpus2:
+        docs = {}
+
+        def chunks_page(self, doc_id, page):
+            from duizhang.schemas import Chunk
+            return [Chunk(f"{doc_id}#c", doc_id, page, 0,
+                          "营业收入（元） 100.00 50.00 100.00%")]
+
+    from duizhang.graph import make_nodes
+    generate = make_nodes(TrendCorpus2())[5]
+    st = generate({**new_state("中际旭创最近几个季度营收趋势", "heuristic"),
+                   "hits": [_hit("中际旭创_2025Q1#c", "中际旭创_2025Q1",
+                                 3, 0, "营业收入（元） 100.00 50.00 100.00%", 1)],
+                   "understanding": {"intent": "trend",
+                                     "companies": ["中际旭创"],
+                                     "period": "", "reason": "r"}})
+    assert "中际旭创_2025Q1" in st["answer"]          # 骨架在场
+    assert "不构成投资建议" in st["answer"]
+
+
 def test_trend_intent_and_period_order():
     """trend 意图：趋势词触发、优先级低于 compare；报告期按时间序
     （period 后缀映射月份——字典序会把 H1 排在 Q1 前，时间上是错的）；

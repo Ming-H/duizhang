@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 
 from duizhang.index import word_tokens
+from duizhang.ingest import expand_query
 from duizhang.schemas import GraphState, Retrieved
 
 _SENT_SPLIT = re.compile(r"(?<=[。；！？])\s*")
@@ -48,21 +49,41 @@ def _content_tokens(toks, extra_meta: tuple[str, ...] = (),
 
 def extractive_answer(state: GraphState, hits: list[Retrieved],
                       max_sents: int = 4) -> tuple[str, list[str]]:
-    """从 top 命中块抽证据句：与 query 的内容词重叠（元词不计分）+ 领域加权。"""
-    q = _content_tokens(word_tokens(state["effective_query"]))
+    """从 top 命中块抽证据句：与 query 的内容词重叠（元词不计分）+ 领域加权。
+    打分词先经 expand_query：口语词（营收/revenue）与证据术语
+    （营业总收入）零词元重叠会空手拒答（heuristic innolight 实测）。"""
+    q = _content_tokens(word_tokens(expand_query(state["effective_query"])))
     # 问「原因/变动」时给归因句加权：财报的因果句式是「主要系…影响」「主要由于…所致」
     wants_reason = any(w in state["query"] for w in ("原因", "为什么", "为何", "变动"))
     _REASON_PAT = re.compile(r"主要系|主要因|主要由于|所致|影响")
+    # PDF 断词工件注入：主要会计数据表的标签行（无数字表块）被空表头
+    # 过滤丢弃后，数字行以断词残片开头——「润（元）…」实为「净利润」、
+    # 「入（元）…」实为「营业收入/收入」。不注入则 query 的完整词与
+    # 证据零重叠，真值行落选（实测 2025Q1 归母净利行）
+    _SPLIT_FIX = (("润（元）", "净利润"), ("入（元）", "营业收入"),
+                  ("额（元）", "总资产额"))
+
+    def _inject(text: str) -> str:
+        for frag, full in _SPLIT_FIX:
+            if text.lstrip().startswith(frag):
+                return full + " " + text
+        return text
+
     scored = []
     for h in hits[:8]:   # 与 TOP_K 对齐：表格大块常占前排，答案块在 6 名开外
         company = h.chunk.doc_id.split("_", 1)[0]   # doc_id = 公司_报告期
-        for s in _sentences(h.chunk.text):
+        for s in _sentences(_inject(h.chunk.text)):
             stoks = _content_tokens(set(word_tokens(s)) | set(word_tokens(h.chunk.text[:40])),
                                     extra_meta=(company,), meta_chars=frozenset(company))
             overlap = len(q & stoks)
             # 数字句优先（财报问答大多数时候在问数字）
             has_num = bool(re.search(r"\d", s)) or bool(h.chunk.num_notes)
             score = overlap * (1.4 if has_num else 1.0) + (0.2 if h.chunk.num_notes else 0.0)
+            # 数字问句（「多少」）下，无数字句强降权：表头行（「归属于
+            # 上市公司股东的净利润（元）」）词面完美匹配扩展词却无值，
+            # 会压过真值行（扩展词引入后实测）
+            if not has_num and any(w in state["query"] for w in ("多少", "几")):
+                score *= 0.3
             if wants_reason and _REASON_PAT.search(s):
                 score += 1.5
             scored.append((score, s, h.chunk))

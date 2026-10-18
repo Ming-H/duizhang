@@ -8,7 +8,7 @@
 
 | 层 | 命令 | 耗时 | 裁判作用 |
 |---|---|---|---|
-| 单元测试 | `pytest`（62 用例，conftest 封网永不调 LLM） | ~5s | 代码正确性 + 历史 bug 回归 |
+| 单元测试 | `pytest`（64 用例，conftest 封网永不调 LLM） | ~5s | 代码正确性 + 历史 bug 回归 |
 | 评估集 | `eval`（双数据集 × 双模式，samples 库上跑） | ~2min | 端到端质量门槛（见 §3） |
 | 手工验收 | `ask`（本文 §1 用例，看答案 + trace） | ~10s/题 | 真实体验与 trace 行为 |
 | CI | push 自动（ruff + pytest + 30 秒冒烟） | ~45s | 最后防线 |
@@ -98,8 +98,8 @@ DZ_DB=/tmp/dz_eval/t.db python -m duizhang.cli eval --mode llm               # �
 | ① | heuristic · default（10 题） | 1.00 / 1.00 / 1.00 |
 | ② | heuristic · agent（8 题） | 1.00 / 1.00 / 1.00 |
 | ③ | llm · agent | **1.00 / 1.00 / 1.00** |
-| ④ | llm · default | ≥ 0.875 / 0.875 / 1.00 |
-| ⑤ | llm · innolight（14 题真值集，工作库上跑） | ≥ 0.85（详见 RAG-EVAL-CASES.md） |
+| ④ | llm · default | 1.00 / 1.00 / 1.00 |
+| ⑤ | llm · innolight（14 题真值集，工作库上跑） | 1.00 / 1.00 / 1.00 |
 
 > 注：评估集基于 samples 三家公司；在 中际旭创 工作库上跑会因缺文档判 ✗，
 > 属预期非 bug。陷阱题两类（2030 未来期间 / 天气）在任何模式下必须拒答。
@@ -146,7 +146,7 @@ DZ_DB=/tmp/dz_eval/t.db python -m duizhang.cli eval --mode llm               # �
 ## 6. 快速回归流程（改代码后的标准动作）
 
 ```bash
-pytest                                                          # ① 62 用例
+pytest                                                          # ① 64 用例
 （§3 四连评估）                                                  # ② 基准不破
 python -m duizhang.cli ask "中际旭创最近几个季度营收的趋势，值得投资吗"   # ③ trend 冒烟
 python -m duizhang.cli ask "中际旭创 2027 年净利润多少"            # ④ 守卫冒烟

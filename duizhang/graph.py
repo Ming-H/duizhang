@@ -270,20 +270,24 @@ def make_nodes(corpus: Corpus):
         if u is None:
             u = rule_understand(q, corpus)
         else:
-            # 意图守卫：小模型会把「哪家赚得多」判成合法枚举 metric——
-            # 公司≥2 且 query 含对比词时强制 compare（多跳分解的前提）
-            if (u.get("intent") == "metric" and len(u.get("companies") or []) >= 2
-                    and any(w in q for w in _COMPARE_WORDS)):
-                u["intent"] = "compare"
             # 趋势守卫：0.8b 实测把趋势问句判成 summary（单文档残渣）
             if u.get("intent") == "summary" and any(w in q for w in _TREND_WORDS):
                 u["intent"] = "trend"
             # 公司名纠偏：LLM 幻觉出语料外的公司时，用规则命中的兜底
             known = {d.company for d in corpus.docs.values() if d.company}
             rule_u = rule_understand(q, corpus)
+            # 公司漏检守卫：规则的子串匹配是确定性的，LLM 漏抽一家
+            # 会让 compare 退化成单公司 metric（samples 实测哪家题）
+            if len(rule_u["companies"]) > len(u.get("companies") or []):
+                u["companies"] = rule_u["companies"]
             if not set(u["companies"]) <= known:
                 if rule_u["companies"]:
                     u["companies"] = rule_u["companies"]
+            # 意图守卫：小模型会把「哪家赚得多」判成合法枚举 metric——
+            # 公司≥2 且 query 含对比词时强制 compare（多跳分解的前提）
+            if (u.get("intent") == "metric" and len(u.get("companies") or []) >= 2
+                    and any(w in q for w in _COMPARE_WORDS)):
+                u["intent"] = "compare"
             # period 覆盖：query 有明确期间词时规则是确定性子串匹配，
             # LLM 抽取实测会稳定抽错（「第一季度」→H1，v0.6.2 提示词
             # 加长后劣化）——规则非空即覆盖；query 无期间词时规则为空，
@@ -291,9 +295,16 @@ def make_nodes(corpus: Corpus):
             if rule_u["period"]:
                 u["period"] = rule_u["period"]
             # trend 必要条件：query 含趋势词（0.8b 会把「预计…多少」
-            # 判成 trend 并在 reason 里幻觉数字，实测）
+            # 判成 trend 并在 reason 里幻觉数字，实测）。降级目标用规则
+            # 意图而非硬编码 metric——同一 query 三次返回三种意图，直接
+            # 降 metric 会让 compare 题漏判（samples 哪家题实测）
             if u.get("intent") == "trend" and not any(w in q for w in _TREND_WORDS):
-                u["intent"] = "metric"
+                u["intent"] = rule_u["intent"] if rule_u["intent"] != "trend" else "metric"
+            # 股价/涨跌类守卫：0.8b 偶发判 metric 拿净利表头行回答股价
+            # 问题（实测），语料是财报不含行情——归 other 拒答
+            if u.get("intent") == "metric" and any(
+                    w in q for w in ("股价", "会涨", "会跌", "涨停", "跌停")):
+                u["intent"] = "other"
         return {**state, "understanding": u, "trace": trace}
 
     def route(state: GraphState) -> GraphState:
@@ -411,6 +422,41 @@ def make_nodes(corpus: Corpus):
         # 生成与校验的视野——检索精度不动，上下文在生成侧补全
         page_chunks = page_evidence(hits, corpus)
         fallback: list[str] = []
+        # 趋势题：确定性骨架 + LLM 仅做归纳（0.8b 直生成多期长答案
+        # 实测自相矛盾——见 trend_skeleton 注释）。骨架纯代码，模式无关
+        # ——heuristic 同样输出逐期骨架（此前被 llm 条件包裹退化成
+        # 普通抽取式，doc=N 实测）
+        if (state.get("understanding") or {}).get("intent") == "trend":
+            skeleton = trend_skeleton(hits, corpus)
+            if not skeleton:
+                return {**state, "answer": "", "verdict": "refused",
+                        "trace": ["generate:trend-no-facts→refuse"]}
+            summary = ""
+            if state["mode"] == "llm" and llmx.llm_enabled():
+                try:
+                    summary = llmx.chat_text(
+                        "只依据给定的逐期财务数据，用两三句话归纳营收与"
+                        "净利润的趋势方向（上升/放缓/波动）。不要出现任何"
+                        "数字——包括换算后的量级。",
+                        skeleton, max_tokens=512).strip()
+                except Exception:
+                    pass
+                if _re_digits.search(summary):   # 数字禁令由代码执行
+                    summary = ""
+            body = skeleton
+            if summary:
+                body = f"{body}\n\n趋势归纳：{summary.strip()}"
+            body += "\n（以上为财报事实梳理，不构成投资建议）"
+            cited = list(dict.fromkeys(
+                h.chunk.citation for h in hits if h.chunk.citation))
+            ev, seen_docs = [], set()
+            for h in hits:
+                if h.chunk.doc_id in seen_docs:
+                    continue
+                seen_docs.add(h.chunk.doc_id)
+                ev += corpus.chunks_page(h.chunk.doc_id, h.chunk.page)
+            return {**state, "answer": body, "citations": cited,
+                    "evidence": ev or hits, "trace": ["generate:trend"]}
         if state["mode"] == "llm" and llmx.llm_enabled():
             # 证据按页聚合（页首标注），块序拼接；数字归一化注释随块
             by_page: dict[tuple, list] = {}
@@ -423,41 +469,7 @@ def make_nodes(corpus: Corpus):
                                     if c.num_notes else "") for c in cs)
                 parts.append(f"[{doc_id} 第{page}页]\n{body}")
             evidence = "\n\n".join(parts)
-            # 趋势题：确定性骨架 + LLM 仅做归纳（0.8b 直生成多期长答案
-            # 实测自相矛盾——见 trend_skeleton 注释）
-            if (state.get("understanding") or {}).get("intent") == "trend":
-                skeleton = trend_skeleton(hits, corpus)
-                if not skeleton:
-                    return {**state, "answer": "", "verdict": "refused",
-                            "trace": ["generate:trend-no-facts→refuse"]}
-                summary = ""
-                try:
-                    summary = llmx.chat_text(
-                        "只依据给定的逐期财务数据，用两三句话归纳营收与"
-                        "净利润的趋势方向（上升/放缓/波动）。不要出现任何"
-                        "数字——包括换算后的量级。",
-                        skeleton, max_tokens=512).strip()
-                except Exception:
-                    pass
-                if _re_digits.search(summary):   # 数字禁令由代码执行
-                    summary = ""
-                body = skeleton
-                if summary:
-                    body = f"{body}\n\n趋势归纳：{summary.strip()}"
-                body += "\n（以上为财报事实梳理，不构成投资建议）"
-                cited = list(dict.fromkeys(
-                    h.chunk.citation for h in hits if h.chunk.citation))
-                # verify 证据池与骨架候选池同源（每期首命中页的全页块）：
-                # 骨架数字常来自页内兄弟块，而 hits 首块可能只是节标题——
-                # 引用串相同（同页）但正文没数字，文本级重叠会崩（实测 0.119）
-                ev, seen_docs = [], set()
-                for h in hits:
-                    if h.chunk.doc_id in seen_docs:
-                        continue
-                    seen_docs.add(h.chunk.doc_id)
-                    ev += corpus.chunks_page(h.chunk.doc_id, h.chunk.page)
-                return {**state, "answer": body, "citations": cited,
-                        "evidence": ev or hits, "trace": ["generate:trend"]}
+
             try:
                 out = llmx.chat_text(
                     "你是财报问答助手。只依据给定证据回答；每个事实句末尾必须"
@@ -466,7 +478,9 @@ def make_nodes(corpus: Corpus):
                     "并如实标注来源，但禁止编造不在证据里的数字。仔细区分"
                     "指标本身的数值区间与「同比增加/将增加」的变动幅度，"
                     "引用问题所问的那个。问「净利润」而未提扣非时，默认指"
-                    "归属于上市公司股东的净利润（非扣非口径）。确实无任何"
+                    "归属于上市公司股东的净利润（非扣非口径）。PDF 断行时它显示为"
+                    "「的净利润（元）」开头的数据行，取该行的本期值（第一列数字）。"
+                    "确实无任何"
                     "相关数字才回答「原文中没有找到依据」。",
                     f"问题：{state['query']}\n\n证据：\n{evidence}")
                 no_evidence = any(p in out for p in (
@@ -663,6 +677,31 @@ def make_nodes(corpus: Corpus):
                 if r < len(chunks) and len(hits_out) < TOP_K:
                     hits_out.append(chunks[r])
             r += 1
+        # metric 意图：主要会计数据表前置——真值行常被无数字表头块
+        # 挤出前排（词面匹配更强，实测 5,171,485,967 行排 #6 而表头
+        # 占 #1#2），0.8b 从分季度表抓单季数当全年。关键指标表前置
+        # 后 LLM 证据头部即真值行（trend 同款哲学）
+        if u.get("intent") == "metric" and hits_out:
+            comps = [c for c in (u.get("companies") or []) if c]
+            comp0 = comps[0] if len(comps) == 1 else ""
+            years = query_years(state["query"])
+            scope = {d for d, doc in corpus.docs.items()
+                     if (not comp0 or doc.company == comp0)
+                     and (not u.get("period") or u["period"] in doc.period)
+                     and (not years or doc.period[:4] in years)} or None
+            probe = corpus.search("主要会计数据", k=2, doc_filter=comp0,
+                                  doc_scope=scope)
+            from duizhang.schemas import Retrieved
+            key_page_chunks = []
+            get_page = getattr(corpus, "chunks_page", None)
+            if probe and get_page:
+                kdoc, kpage = probe[0].chunk.doc_id, probe[0].chunk.page
+                key_page_chunks = [
+                    Retrieved(chunk=c, score=0.3, rank=i)
+                    for i, c in enumerate(get_page(kdoc, kpage))]
+            probe_ids = {c.chunk.chunk_id for c in key_page_chunks}
+            hits_out = key_page_chunks + \
+                [h for h in hits_out if h.chunk.chunk_id not in probe_ids]
         eff = state.get("effective_query", state["query"])
         for q in agent_queries:
             if q not in eff:
