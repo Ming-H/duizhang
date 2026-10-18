@@ -142,7 +142,7 @@ duizhang/
 tests/              # 52 用例（conftest 封网：永不外呼 LLM）
 evals/              # dataset.json（10 题）+ dataset-agent.json（8 题含多跳对比）
 samples/            # 3 家公司 5 份真实财报（巨潮）
-docs/               # 设计文档 ×4 + EXPLAINER 讲解 + 流程动效图
+docs/               # 设计文档 ×4 + EXPLAINER + TEST-CASES 测试手册 + 流程动效图
 .env                # 密钥（gitignored，永不进 git）
 ```
 
