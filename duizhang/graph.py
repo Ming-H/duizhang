@@ -284,10 +284,16 @@ def make_nodes(corpus: Corpus):
             if not set(u["companies"]) <= known:
                 if rule_u["companies"]:
                     u["companies"] = rule_u["companies"]
-            # period 回填：小模型抽期间时灵时不灵（空串→检索不限期间→
-            # 年报块淹没，实测）——空值时用规则的确定性匹配
-            if not u["period"] and rule_u["period"]:
+            # period 覆盖：query 有明确期间词时规则是确定性子串匹配，
+            # LLM 抽取实测会稳定抽错（「第一季度」→H1，v0.6.2 提示词
+            # 加长后劣化）——规则非空即覆盖；query 无期间词时规则为空，
+            # 保留 LLM 对隐式期间的判断
+            if rule_u["period"]:
                 u["period"] = rule_u["period"]
+            # trend 必要条件：query 含趋势词（0.8b 会把「预计…多少」
+            # 判成 trend 并在 reason 里幻觉数字，实测）
+            if u.get("intent") == "trend" and not any(w in q for w in _TREND_WORDS):
+                u["intent"] = "metric"
         return {**state, "understanding": u, "trace": trace}
 
     def route(state: GraphState) -> GraphState:

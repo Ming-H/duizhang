@@ -269,6 +269,29 @@ def test_trend_skeleton_collapses_adjust_columns():
     assert "本期" in out and "同比" in out               # 列说明在场
 
 
+def test_understand_period_override_and_trend_necessity(app, monkeypatch):
+    """v0.6.2 实测回归：①「第一季度」被 0.8b 稳定抽成 H1——query 有
+    明确期间词时规则是确定性匹配，应覆盖 LLM 的非空错值（原守卫只
+    补空）；②「预计净利润多少」被判 trend（无趋势词）——trend 的
+    必要条件是 query 含趋势词，否则降级 metric。"""
+    from duizhang import llm as llmx
+    from duizhang.graph import make_nodes
+    understand = make_nodes(_MiniCorpus())[0]
+    monkeypatch.setattr(llmx, "llm_enabled", lambda: True)
+    # ① LLM 给错期间（H1），query 明确说第一季度 → 覆盖为 Q1
+    monkeypatch.setattr(llmx, "chat_json", lambda s, u, **kw: {
+        "intent": "compare", "companies": ["欧科亿", "海伦哲"],
+        "period": "H1", "reason": "一季度比较"})
+    st = understand(new_state("对比欧科亿和海伦哲 2026 年第一季度的营业收入", "llm"))
+    assert st["understanding"]["period"] == "Q1"
+    # ② LLM 判 trend 但 query 无趋势词 → 降级 metric
+    monkeypatch.setattr(llmx, "chat_json", lambda s, u, **kw: {
+        "intent": "trend", "companies": ["欧科亿"], "period": "H1",
+        "reason": "预测"})
+    st2 = understand(new_state("欧科亿 2026 年半年度预计净利润多少", "llm"))
+    assert st2["understanding"]["intent"] == "metric"
+
+
 def test_understand_trend_guard(app, monkeypatch):
     """0.8b 实测把趋势问句判成 summary——守卫纠正（与 compare 守卫同款）。"""
     from duizhang import llm as llmx
