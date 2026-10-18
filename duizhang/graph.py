@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 
 from langgraph.graph import END, START, StateGraph
@@ -117,13 +118,36 @@ def page_evidence(hits, corpus, top_n: int = 4, window: int = 2,
     return out
 
 
+def _parse_metric_row(text: str) -> tuple[str, str] | None:
+    """主要会计数据行 → (本期亿值, 同比%)。本期取第一个非百分数、
+    ≥1e6 的大数（防「4.842 546」这类残缺数字误入）；同比取最后的
+    百分比。解析不出返回 None（该指标省略，不打印错数）。"""
+    nums = re.findall(r"\d[\d,]*(?:\.\d+)?%?", text)
+    pct = None
+    for n in nums:
+        if n.endswith("%"):
+            pct = n
+    vals = []
+    for n in nums:
+        if not n.endswith("%"):
+            try:
+                v = float(n.replace(",", ""))
+            except ValueError:
+                continue
+            if v >= 1e6:
+                vals.append(v)
+    if not vals:
+        return None
+    yi = vals[0] / 1e8
+    return f"{yi:,.1f} 亿", (pct.rstrip("%") + "%") if pct else ""
+
+
 def trend_skeleton(hits, corpus=None) -> str:
-    """趋势答案的确定性骨架：每期营收句+净利句 + 该期引用，按时间
-    升序。LLM 直生成多期长答案实测自相矛盾（0.8b 编造报告期/修正
-    推断螺旋）——引用必须 100% 真实，骨架交给代码。候选池 = 该期
-    全部命中块 + 首命中所在页的全页块（检索常被节标题块占位，钱在
-    同页兄弟块里——实测 2026H1「主要会计数据」标题块挤掉营收行）。"""
-    import re as _re
+    """趋势数据层（确定性）：每期解析为结构化行
+    「· 期间：营收 X 亿（同比 Y）；归母净利 Z 亿（同比 W）[引用]」。
+    原始表格行（本期/同期/同比混排）可读性差（用户实测「很乱」），
+    且 0.8b 需要干净输入才能做分析——数据层干净了分析层才放得开。
+    断词工件（「润（元）…」=净利润行）在此同样注入。"""
     by_doc: dict = {}
     for h in hits:
         ch = h.chunk if hasattr(h, "chunk") else h
@@ -135,34 +159,61 @@ def trend_skeleton(hits, corpus=None) -> str:
         if get_page and chs[0].page:
             pool += [c for c in get_page(doc_id, chs[0].page)
                      if c.chunk_id not in {x.chunk_id for x in pool}]
-        def pick(require: str) -> str:
+
+        def pick(require: str) -> str | None:
             best_s, best_sc = "", -99
             for c in pool:
-                for sent in ans._sentences(c.text):
-                    if not _re.search(r"\d", sent) or require not in sent:
+                c_text = c.text
+                for frag, full in (("润（元）", "净利润"), ("入（元）", "营业收入")):
+                    if c_text.lstrip().startswith(frag):
+                        c_text = full + " " + c_text
+                        break
+                for sent in ans._sentences(c_text):
+                    if require not in sent:
+                        continue
+                    if not re.search(r"\d", sent):
                         continue
                     score = 2
-                    if any(w in sent for w in ("同比", "增减", "较上年", "%")):
+                    if "%" in sent:
                         score += 2
-                    if any(w in sent for w in ("终止经营", "少数股东", "按所有权",
-                                                "净亏损以", "综合收益")):
-                        score -= 5               # 利润表表头/权益变动残渣
+                    if any(w in sent for w in ("适用", "不适用", "差异", "终止经营",
+                                                "少数股东", "会计准则")):
+                        score -= 6          # 段落噪声（2026H1 会计准则段实测）
                     if score > best_sc:
                         best_s, best_sc = sent, score
-            return best_s if best_sc > 0 else ""
+            return best_s if best_sc > 0 else None
 
-        picked = [p for p in (pick("营业收入"), pick("净利润")) if p]
-        if picked:
-            # 折叠相邻重复数字：主要会计数据表带「调整前/调整后」双列，
-            # 无追溯调整时两列相同、原文重复（2025H1 实测）——折叠不改事实
-            picked = [_re.sub(r"(\d[\d,.]*%?)\s+\1(?=\s|$)", r"\1", p)
-                      for p in picked]
-            lines.append(f"· {doc_id}：" +
-                         "；".join(picked) + f" {pool[0].citation}")
-    if not lines:
-        return ""
-    return ("（各期数字依次为：本期、上年同期、同比增减；含追溯调整列时"
-            "数值相同已折叠）\n" + "\n".join(lines))
+        parts = []
+        for label, key in (("营收", "营业收入"), ("归母净利", "净利润")):
+            row = pick(key)
+            if row:
+                parsed = _parse_metric_row(row)
+                if parsed:
+                    yi, pct = parsed
+                    parts.append(f"{label} {yi}（同比 {pct}）" if pct
+                                 else f"{label} {yi}")
+        if parts:
+            period_tag = doc_id.rsplit("_", 1)[-1][-2:]
+            basis = {"H1": "半年累计", "Q1": "单季", "Q3": "前三季累计",
+                     "FY": "全年"}.get(period_tag, "")
+            basis_note = f"（{basis}）" if basis else ""
+            lines.append(f"· {doc_id}{basis_note}：" + "；".join(parts) +
+                         f" {pool[0].citation}")
+    return "\n".join(lines)
+
+
+def _analysis_numbers_ok(analysis: str, rows: str) -> bool:
+    """投资分析数字闸门：分析中每个数字（年份除外）必须出现在数据行里
+    ——表外数字=幻觉，整个分析段丢弃（宁缺毋滥，但不再一刀切禁数字：
+    引用表内数字的分析是允许且需要的）。"""
+    allowed = set(re.findall(r"[\d,]*\d(?:\.\d+)?%?", rows))
+    allowed |= {a.rstrip("%") for a in allowed}
+    for n in re.findall(r"[\d,]*\d(?:\.\d+)?%?", analysis):
+        if re.fullmatch(r"20\d{2}", n):
+            continue
+        if n not in allowed and n.rstrip("%") not in allowed:
+            return False
+    return True
 
 
 # ── 查询理解 ────────────────────────────────────────────
@@ -431,21 +482,31 @@ def make_nodes(corpus: Corpus):
             if not skeleton:
                 return {**state, "answer": "", "verdict": "refused",
                         "trace": ["generate:trend-no-facts→refuse"]}
-            summary = ""
-            if state["mode"] == "llm" and llmx.llm_enabled():
+            analysis = ""
+            # 投资分析默认关（DZ_TREND_ANALYSIS=enabled 开启）：0.8b 三组
+            # 实测语义级不可靠——数字闸门全过（数字来自表格）但仍把
+            # +90.05% 说成「大幅回落」、+69.40% 说成「暴跌」、累计/单季
+            # 混淆——数字对≠结论对，语义闸门无法机械化，只能按模型分档
+            if (state["mode"] == "llm" and llmx.llm_enabled()
+                    and os.environ.get("DZ_TREND_ANALYSIS") == "enabled"):
                 try:
-                    summary = llmx.chat_text(
-                        "只依据给定的逐期财务数据，用两三句话归纳营收与"
-                        "净利润的趋势方向（上升/放缓/波动）。不要出现任何"
-                        "数字——包括换算后的量级。",
-                        skeleton, max_tokens=512).strip()
+                    analysis = llmx.chat_text(
+                        "你是财报分析师。基于给定逐期数据做投资分析（趋势"
+                        "判断/盈利质量/风险点）。铁律：①H1 是半年累计、Q1 "
+                        "是单季——绝对值不可直接比较，跨期比较只能用同比"
+                        "增速；②只准使用给定数据里的数字，禁止任何其他数字"
+                        "（含换算与预测）；③禁止编造数据外的归因（产能/"
+                        "需求/竞争等未被数据提及的因素）。三到五句话。",
+                        skeleton, max_tokens=768).strip()
                 except Exception:
                     pass
-                if _re_digits.search(summary):   # 数字禁令由代码执行
-                    summary = ""
+                # 数字闸门：分析里的数字必须全部来自数据行——表外数字
+                # =幻觉，整个分析段丢弃（宁缺毋滥；引用表内数字允许）
+                if analysis and not _analysis_numbers_ok(analysis, skeleton):
+                    analysis = ""
             body = skeleton
-            if summary:
-                body = f"{body}\n\n趋势归纳：{summary.strip()}"
+            if analysis:
+                body = f"{body}\n\n分析：{analysis}"
             body += "\n（以上为财报事实梳理，不构成投资建议）"
             cited = list(dict.fromkeys(
                 h.chunk.citation for h in hits if h.chunk.citation))
@@ -455,6 +516,13 @@ def make_nodes(corpus: Corpus):
                     continue
                 seen_docs.add(h.chunk.doc_id)
                 ev += corpus.chunks_page(h.chunk.doc_id, h.chunk.page)
+            # 骨架行进证据池：换算值（147.9 亿）不在原文（14,789,074,837.80）
+            # 里，coverage 按字面重叠必然误降级——骨架是证据的确定性解析
+            # 产物（数字闸门同源），本身即合法证据
+            from duizhang.schemas import Chunk as _C
+            for h in hits[:6]:
+                ev.append(_C(chunk_id=f"sk#{h.chunk.doc_id}", doc_id=h.chunk.doc_id,
+                             page=h.chunk.page, seq=0, text=skeleton))
             return {**state, "answer": body, "citations": cited,
                     "evidence": ev or hits, "trace": ["generate:trend"]}
         if state["mode"] == "llm" and llmx.llm_enabled():

@@ -267,13 +267,15 @@ def test_trend_skeleton_mode_independent():
         def chunks_page(self, doc_id, page):
             from duizhang.schemas import Chunk
             return [Chunk(f"{doc_id}#c", doc_id, page, 0,
-                          "营业收入（元） 100.00 50.00 100.00%")]
+                          "营业收入（元） 6,674,176,487.23 4,842,546,924.23"
+                          " 37.82%")]
 
     from duizhang.graph import make_nodes
     generate = make_nodes(TrendCorpus2())[5]
     st = generate({**new_state("中际旭创最近几个季度营收趋势", "heuristic"),
                    "hits": [_hit("中际旭创_2025Q1#c", "中际旭创_2025Q1",
-                                 3, 0, "营业收入（元） 100.00 50.00 100.00%", 1)],
+                                 3, 0, "营业收入（元） 6,674,176,487.23"
+                                 " 4,842,546,924.23 37.82%", 1)],
                    "understanding": {"intent": "trend",
                                      "companies": ["中际旭创"],
                                      "period": "", "reason": "r"}})
@@ -294,17 +296,34 @@ def test_trend_intent_and_period_order():
         < _period_key("2026FY") < _period_key("2027Q1")
 
 
-def test_trend_skeleton_collapses_adjust_columns():
-    """主要会计数据表带「调整前/调整后」双列，数值相同时原文重复打印
-    （2025H1 实测 10,798,594,185.75 出现两遍）——骨架折叠相邻重复并
-    顶部给列说明，可读性；引用仍逐字对应原文块。"""
+def test_trend_skeleton_structured_rows():
+    """趋势骨架 = 结构化行（期间/营收亿/同比/净利亿），非原始表格行：
+    本期/同期/同比混排一串数字可读性差（用户实测「很乱」）；断词行
+    「润（元）…」解析为净利；解析失败该指标省略而非打印错数。"""
     from duizhang.graph import trend_skeleton
     hits = [_hit("d#p8#1", "中际旭创_2025H1", 8, 1,
                  "营业收入（元） 14,789,074,837.80 10,798,594,185.75"
-                 " 10,798,594,185.75 36.95%", 1)]
+                 " 10,798,594,185.75 36.95%", 1),
+            _hit("d#p8#3", "中际旭创_2025H1", 8, 3,
+                 "润（元） 3,995,115,384.70 2,358,421,051.42 69.40%", 2)]
     out = trend_skeleton(hits)
-    assert out.count("10,798,594,185.75") == 1          # 重复折叠
-    assert "本期" in out and "同比" in out               # 列说明在场
+    assert "中际旭创_2025H1" in out
+    assert "147.9 亿" in out and "36.95%" in out       # 营收本期→亿+同比
+    assert "40.0 亿" in out and "69.40%" in out        # 断词净利行也解析
+    assert "10,798,594,185.75" not in out              # 原始串不再直接输出
+
+
+def test_trend_analysis_number_gate(monkeypatch):
+    """投资分析放开 LLM，但分析里的数字必须来自数据行（可验证闸门，
+    而非一刀切禁数字）——出现表外数字整个分析段丢弃，宁缺毋滥。"""
+    from duizhang.graph import trend_skeleton
+    rows = trend_skeleton([_hit("d#p8#1", "中际旭创_2025H1", 8, 1,
+                                "营业收入（元） 14,789,074,837.80 10,798,594,185.75"
+                                " 36.95%", 1)])
+    gate = __import__("duizhang.graph", fromlist=["_analysis_numbers_ok"])
+    ok = gate._analysis_numbers_ok("2025H1 营收 147.9 亿（+36.95%），增长强劲。", rows)
+    bad = gate._analysis_numbers_ok("预计 2027 年营收将达 800 亿。", rows)
+    assert ok is True and bad is False
 
 
 def test_understand_period_override_and_trend_necessity(app, monkeypatch):
