@@ -256,6 +256,19 @@ def test_trend_intent_and_period_order():
         < _period_key("2026FY") < _period_key("2027Q1")
 
 
+def test_trend_skeleton_collapses_adjust_columns():
+    """主要会计数据表带「调整前/调整后」双列，数值相同时原文重复打印
+    （2025H1 实测 10,798,594,185.75 出现两遍）——骨架折叠相邻重复并
+    顶部给列说明，可读性；引用仍逐字对应原文块。"""
+    from duizhang.graph import trend_skeleton
+    hits = [_hit("d#p8#1", "中际旭创_2025H1", 8, 1,
+                 "营业收入（元） 14,789,074,837.80 10,798,594,185.75"
+                 " 10,798,594,185.75 36.95%", 1)]
+    out = trend_skeleton(hits)
+    assert out.count("10,798,594,185.75") == 1          # 重复折叠
+    assert "本期" in out and "同比" in out               # 列说明在场
+
+
 def test_understand_trend_guard(app, monkeypatch):
     """0.8b 实测把趋势问句判成 summary——守卫纠正（与 compare 守卫同款）。"""
     from duizhang import llm as llmx

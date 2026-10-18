@@ -153,9 +153,16 @@ def trend_skeleton(hits, corpus=None) -> str:
 
         picked = [p for p in (pick("营业收入"), pick("净利润")) if p]
         if picked:
+            # 折叠相邻重复数字：主要会计数据表带「调整前/调整后」双列，
+            # 无追溯调整时两列相同、原文重复（2025H1 实测）——折叠不改事实
+            picked = [_re.sub(r"(\d[\d,.]*%?)\s+\1(?=\s|$)", r"\1", p)
+                      for p in picked]
             lines.append(f"· {doc_id}：" +
                          "；".join(picked) + f" {pool[0].citation}")
-    return "\n".join(lines)
+    if not lines:
+        return ""
+    return ("（各期数字依次为：本期、上年同期、同比增减；含追溯调整列时"
+            "数值相同已折叠）\n" + "\n".join(lines))
 
 
 # ── 查询理解 ────────────────────────────────────────────
