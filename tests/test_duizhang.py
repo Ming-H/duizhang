@@ -12,11 +12,15 @@ def corpus(tmp_path_factory):
     """走生产路径建库：Store 写入 → Corpus 加载（与 CLI 完全一致）。"""
 
     from duizhang.index import Corpus
-    from duizhang.ingest import ingest_file
+    from duizhang.ingest import ingest_file, parse_filename
     from duizhang.store import Store
     db = tmp_path_factory.mktemp("dz") / "test.db"
     store = Store(db)
     for f in sorted(SAMPLES.glob("*.pdf")) + sorted(SAMPLES.glob("*.md")):
+        try:
+            parse_filename(f)          # 与 cli 同闸：解析失败拒收不入库
+        except ValueError:
+            continue
         store.add_doc(*ingest_file(f))
     store.close()
     return Corpus.load(db)
@@ -59,6 +63,23 @@ def test_metric_synonym_expansion():
     assert "营业收入" in expand_query("营收怎么样")
 
 
+def test_metric_synonym_guimu():
+    """归母 → 归属于上市公司股东的净利润：chunk 级探针曾因缺此映射
+    MISS（归母是财报社区通用缩写，正文从不这么写）。"""
+    assert "归属于上市公司股东的净利润" in expand_query("归母净利润怎么样")
+
+
+def test_parse_filename_rejects_non_company_fallback():
+    """P0.5：兜底通道抽出的「公司名」是日期/纯数字（20261009_永和…分析.md
+    → company=20261009 → doc_id 20261009_MD 垃圾入库）时拒收——
+    cli 以 ⚠ 跳过，不静默降级。含 CJK 主干的分析文件照常 ANALYSIS。"""
+    from duizhang.ingest import parse_filename
+    with pytest.raises(ValueError):
+        parse_filename("20261009_永和股份三季预告_静水CANSLIM分析.md")
+    company, _period, kind = parse_filename("永和股份_分析.md")
+    assert (company, kind) == ("永和股份", "ANALYSIS")
+
+
 def test_period_hints_exclusive():
     """「半年度」包含「年度」：顺序判定会让 FY 混进半年度问题的
     期间过滤，年报块随之淹没正确期间（2026-10-14 全量库实测）。"""
@@ -74,6 +95,18 @@ def test_period_hints_exclusive():
     assert period_hints("二季度净利润") == ["H1"]      # 财报日历：Q2=半年报
     assert period_hints("四季度全年展望") == ["FY"]
     assert period_hints("今天天气怎么样") == []
+
+
+def test_period_hints_bare_year_is_fy():
+    """D18 裸年份→FY：query 只有年份没有期间词时，默认年报口径；
+    否则期间过滤为空 → 各期间文档混排，半年报/一季报的数顶掉年报数
+    （2026-10-19 innolight 库实测 6 处失败共同根因）。年份判定复用
+    query_years（含口语二位「15年」）。无年份仍不限定。"""
+    from duizhang.graph import period_hints
+    assert period_hints("中际旭创 2025 年营业收入多少") == ["FY"]
+    assert period_hints("15 年营收") == ["FY"]          # 口语二位年份同口径
+    assert period_hints("营收多少") == []                # 无年份 → 不限定
+    assert period_hints("今天天气怎么样") == []          # 领域外不因年份误限定
 
 
 # ── 生成与对账层 ────────────────────────────────────────
@@ -107,6 +140,23 @@ def test_verify_passes_for_md_doc_citations():
     assert verdict == "pass"
 
 
+def test_citation_matching_survives_space_drift():
+    """D13 引用格式解耦：小模型手写引用的空格会漂移（「第 8 页」/
+    「doc_id第8页」粘连），chunk.citation 精确子串匹配不认 → has_citation
+    挂 → 有据答案全 degraded、compare 题结论句被抽取式顶掉（2026-10-19
+    llm 模式实测：cov=0.8 仍 degraded）。匹配必须对空白不敏感。"""
+    from duizhang.answer import citation_coverage, has_citation, verify
+    h = _hit("c1", "中际旭创_2025FY", 8, 0,
+             "2025 年营业收入 38,239,935,640.67 元。", 1)
+    fact = "2025 年营业收入 38,239,935,640.67 元"
+    for drift in ("[中际旭创_2025FY 第 8 页]",    # 数字两侧加空格
+                  "[中际旭创_2025FY第8页]"):      # doc 与第N页粘连
+        answer = f"{fact} {drift}"
+        assert has_citation(answer, [h]), drift
+        assert citation_coverage(answer, [h]) >= 0.45, drift
+        assert verify(answer, [h]) == ("pass", citation_coverage(answer, [h])), drift
+
+
 def test_extractive_notes_follow_picked_chunks():
     """数字注释应来自「被选中句所在的块」而非固定 top1——关键数字句常在
     第 2 名开外，注释缺席会让「≈4.19亿」类问法打不中（eval kw 实测）。"""
@@ -135,6 +185,152 @@ def test_extractive_skips_boilerplate_header_sentences():
     body, _cited = extractive_answer(st, [header, fact])
     assert "520,053,589" in body          # 数字句入选
     assert "专用车辆" not in body         # 页眉句落选
+
+
+def test_verify_pool_includes_beyond_rank4_hits():
+    """verify 证据池 = 页级集合 ∪ hits：page_evidence 只装 hits[:4] 的页
+    窗口，extractive 却从 hits[:8] 抽句——rank 5–8 被引块缺席会让正确
+    答案被误标 degraded（拼接行常排中段，2025Q1 扣非实测 0.395）。
+    与 coverage 层 test_coverage_counts_cited_chunks_beyond_rank4 同哲学。"""
+    from duizhang.graph import make_nodes
+    from duizhang.index import Corpus
+    from duizhang.schemas import new_state
+    nodes = make_nodes(Corpus.__new__(Corpus))       # verify 不查库
+    verify = nodes[9]
+    fact = _hit("c6", "中际旭创_2025Q1", 3, 5,
+                "归属于上市公司股东的扣除非经常性损益的净利润（元）"
+                " 1,568,385,287.19 58.39%", 6)      # rank 6：页窗口外
+    other = _hit("c1", "中际旭创_2025FY", 94, 0,
+                 "营业收入 38,239,935,640.67 元。", 1)
+    st = new_state("中际旭创 2025 一季度扣非净利润多少", "heuristic")
+    st.update(hits=[other, fact], evidence=[other.chunk],   # 页窗口只见 rank1
+              answer=f"扣除非经常性损益后的净利润 1,568,385,287.19 元"
+                     f" {fact.chunk.citation}",
+              citations=[fact.chunk.citation])
+    out = verify(st)
+    assert out["verdict"] == "pass", out.get("trace")
+
+
+def test_extractive_caliber_guard_koufei_vs_revenue():
+    """口径守卫（extractive 层，D16 同款）：问句未提扣非时，扣非行不得
+    抢答营收/净利问句——rewrite 会给 effective_query 追加通用词
+    （净利润/扣非净利润），拼接后的扣非行标签+数字齐全、词面全中，
+    实测顶掉营收行（25 年年报营收答成扣非 10,710,053,246.51）。"""
+    from duizhang.answer import extractive_answer
+    from duizhang.schemas import new_state
+    koufei = _hit("kf", "中际旭创_2025FY", 8, 4,
+                  "归属于上市公司股东的扣除非经常性损益的净利润（元）"
+                  " 10,710,053,246.51 5,068,356,338.29 111.31%", 1)
+    revenue = _hit("rev", "中际旭创_2025FY", 8, 1,
+                   "营业收入（元） 38,239,935,640.67 23,862,159,738.37 60.25%", 2)
+    st = new_state("中际旭创 25 年年报营收多少", "heuristic")
+    # 模拟 rewrite 后的 effective_query：含通用追加词（净利润/同比）
+    st["effective_query"] = "中际旭创 25 年年报营收多少 营业收入 净利润 预计 同比"
+    body, _c = extractive_answer(st, [koufei, revenue])
+    assert "38,239,935,640.67" in body       # 营收行胜出
+    assert "10,710,053,246.51" not in body   # 扣非行不得抢答
+
+
+def test_front_key_table_cap_and_reason_skip():
+    """D14 前置封顶：主要会计数据表整页前置（长页 12+ 块）会淹没 Agent
+    自己收集的证据；归因题（原因/为什么/变动）要的是叙事证据，表格行
+    前置只会挤掉归因句——跳过。"""
+    from duizhang.graph import front_key_table
+    from duizhang.schemas import Doc
+    key_page = [_hit(f"k{i}", "中际旭创_2025Q1", 3, i, f"表行{i} 1,234,567.8", i)
+                for i in range(12)]
+    agent_hit = _hit("a1", "中际旭创_2025FY", 94, 0,
+                     "营业收入 38,239,935,640.67", 1)
+
+    class FakeCorpus:
+        docs = {"中际旭创_2025Q1":
+                Doc("中际旭创_2025Q1", "中际旭创", "2025Q1", "一季报", "x", 13)}
+
+        def search(self, query, k=8, doc_filter="", doc_scope=None):
+            return [_hit("probe", "中际旭创_2025Q1", 3, 0, "主要会计数据", 1)]
+
+        def chunks_page(self, doc_id, page):
+            return [h.chunk for h in key_page]
+
+    u = {"intent": "metric", "companies": ["中际旭创"], "period": "Q1"}
+    out = front_key_table([agent_hit], u, "中际旭创 2025 一季度营收多少",
+                          FakeCorpus())
+    assert len(out) == 1 + 8                      # 封顶 8 块，不整页
+    assert out[0].chunk.chunk_id == "k0"          # 表页块在头部
+    # 归因题：跳过前置，Agent 证据原样
+    out2 = front_key_table([agent_hit], u, "中际旭创 2025 一季度净利润变动原因",
+                           FakeCorpus())
+    assert out2 == [agent_hit]
+
+
+def test_trend_generate_cites_only_skeleton_docs():
+    """trend 引用收窄：引用列表必须等于骨架行里实际出现的引用——
+    此前 cite 全部 hits 的引用（含骨架没采用行的期间/页），引用列表
+    虚胖且不可回溯到答案文本。"""
+    from duizhang.graph import make_nodes
+    from duizhang.schemas import new_state
+
+    class _C:                      # trend 分支只需页查询能力
+        @staticmethod
+        def chunks_page(doc_id, page):
+            return []
+
+    generate = make_nodes(_C())[5]
+    used = _hit("u1", "中际旭创_2025Q1", 3, 1,
+                "营业收入（元） 6,674,176,487.23 4,842,546,924.23 37.82%", 1)
+    unused = _hit("x1", "中际旭创_2024Q3", 2, 1,
+                  "经营情况讨论与非财务叙述段落。", 2)   # 无可解析行
+    st = new_state("中际旭创最近几个季度的营收趋势", "heuristic")
+    st["understanding"] = {"intent": "trend", "companies": ["中际旭创"],
+                           "period": "", "reason": "rule"}
+    st["hits"] = [used, unused]
+    out = generate(st)
+    assert used.chunk.citation in out["citations"]
+    assert unused.chunk.citation not in out["citations"]   # 收窄：不出现在答案里的不引用
+
+
+def test_stitch_adjacent_table_rows():
+    """D16+B2 同页相邻表块拼接：PDF 主要会计数据表把「口径标签块」与
+    「光数值块」切成相邻块（2025Q1 扣非：seq4 标签 / seq5 数值
+    1,568,385,287.19）。光数值块无词面可与 query 命中，检索只召回标签块
+    ——句级打分丢无数字句，扣非题答成归母值（seq18 页 10 标签+数字
+    齐全抢答）。拼接把同页相邻的标签块+数值块合成整行。"""
+    from duizhang.graph import stitch_adjacent
+    label = _hit("a#p3#4", "中际旭创_2025Q1", 3, 4,
+                 "归属于上市公司股东的扣除 非经常性损益的净利润 （元）", 1)
+    nums = _hit("a#p3#5", "中际旭创_2025Q1", 3, 5,
+                "1,568,385,287.19 990,216,569.13 58.39%", 2)
+    complete = _hit("a#p3#1", "中际旭创_2025Q1", 3, 1,
+                    "营业收入（元） 6,674,176,487.23 4,842,546,924.23 37.82%", 3)
+
+    class C:
+        @staticmethod
+        def chunks_page(doc_id, page):
+            return [complete.chunk, label.chunk, nums.chunk]
+
+    out = stitch_adjacent([label], corpus=C())
+    assert len(out) == 1
+    merged = out[0].chunk
+    assert "1,568,385,287.19" in merged.text          # 数值并入整行
+    assert merged.text.index("扣除") < merged.text.index("1,568")  # 标签在前
+    # 完整行（标签+数字同块）不拼接、不受影响
+    assert stitch_adjacent([complete], corpus=C())[0].chunk.text \
+        == complete.chunk.text
+
+
+def test_trend_skeleton_rejects_koufei_for_default_caliber():
+    """口径守卫：skeleton 的「归母净利」默认归母口径——含「扣除/
+    扣非」的行是另一口径，词面同样含「净利润」，不加守卫时先到
+    先得会拿扣非数当归母（1,568,385,287.19 vs 1,582,876,128.67）。"""
+    from duizhang.graph import trend_skeleton
+    koufei = _hit("a#p3#5", "中际旭创_2025Q1", 3, 5,
+                  "扣除非经常性损益的净利润（元） 1,568,385,287.19 "
+                  "990,216,569.13 58.39%", 1)      # 扣非行放前排：先到先得
+    guimu = _hit("a#p3#3", "中际旭创_2025Q1", 3, 3,
+                 "润（元） 1,582,876,128.67 1,009,266,297.74 56.83%", 2)
+    sk = trend_skeleton([koufei, guimu])
+    assert "15.8 亿" in sk           # 归母 1,582,876,128.67 → 15.8 亿
+    assert "15.7 亿" not in sk       # 扣非 15.7 亿不得顶替归母口径
 
 
 def test_period_filter_is_doc_level():

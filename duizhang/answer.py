@@ -73,6 +73,12 @@ def extractive_answer(state: GraphState, hits: list[Retrieved],
     for h in hits[:8]:   # 与 TOP_K 对齐：表格大块常占前排，答案块在 6 名开外
         company = h.chunk.doc_id.split("_", 1)[0]   # doc_id = 公司_报告期
         for s in _sentences(_inject(h.chunk.text)):
+            # 口径守卫（D16 同款，与 trend pick() 一致）：问句未提「扣」
+            # 时扣非口径行不作候选——rewrite 给 effective_query 追加的
+            # 通用词（净利润/扣非净利润）会让拼接后的扣非行词面全中，
+            # 实测顶掉营收行（25 年年报营收答成扣非 10,710,053,246.51）
+            if ("扣除" in s or "扣非" in s) and "扣" not in state["query"]:
+                continue
             stoks = _content_tokens(set(word_tokens(s)) | set(word_tokens(h.chunk.text[:40])),
                                     extra_meta=(company,), meta_chars=frozenset(company))
             overlap = len(q & stoks)
@@ -117,6 +123,19 @@ def extractive_answer(state: GraphState, hits: list[Retrieved],
 # ── 对账校验 ────────────────────────────────────────────
 
 
+def _cite_norm(s: str) -> str:
+    """引用匹配的空白归一（D13）：小模型手写引用的空格会漂移
+    （「第 8 页」「doc_id第8页」粘连），精确子串匹配不认 → 有据答案
+    全 degraded、compare 结论句被抽取式顶掉（2026-10-19 llm 实测
+    cov=0.8 仍 degraded）。剥尽空白再比，引用语义（doc+页）不变。"""
+    return re.sub(r"\s+", "", s)
+
+
+def citation_in(answer: str, citation: str) -> bool:
+    """答案里是否出现该引用（空白不敏感，D13 引用格式解耦）。"""
+    return _cite_norm(citation) in _cite_norm(answer)
+
+
 def citation_coverage(answer: str, hits: list[Retrieved]) -> float:
     """答案句与证据池的 token 重叠率均值。
 
@@ -149,7 +168,7 @@ def citation_coverage(answer: str, hits: list[Retrieved]) -> float:
     def _chunk(h):
         return h.chunk if hasattr(h, "chunk") else h
 
-    cited = [h for h in hits if _chunk(h).citation in answer]
+    cited = [h for h in hits if citation_in(answer, _chunk(h).citation)]
     pool = cited or hits[:4]
     companies = tuple(dict.fromkeys(
         _chunk(h).doc_id.split("_", 1)[0] for h in pool))
@@ -171,11 +190,13 @@ def citation_coverage(answer: str, hits: list[Retrieved]) -> float:
 def has_citation(answer: str, hits: list[Retrieved] | None = None) -> bool:
     """答案是否带引用：正则覆盖 PDF 块与 LLM 手写格式；hits 兜底
     MD/TXT 块——page=0 的引用是 [doc_id]（无「第N页」、无 `_\d{4}`
-    期间后缀），正则永远漏判。"""
-    if re.search(r"\[[^\]]+第\d+页\]|\[[^\]]+_\d{4}[A-Z0-9]*\]", answer):
+    期间后缀），正则永远漏判。正则在空白归一后的答案上跑：小模型
+    手写引用的空格漂移（第 8 页）不能杀掉有据答案（D13）。"""
+    if re.search(r"\[[^\]]+第\d+页\]|\[[^\]]+_\d{4}[A-Z0-9]*\]", _cite_norm(answer)):
         return True
     return bool(hits) and any(
-        (h.chunk if hasattr(h, "chunk") else h).citation in answer for h in hits)
+        citation_in(answer, (h.chunk if hasattr(h, "chunk") else h).citation)
+        for h in hits)
 
 
 COVERAGE_THRESHOLD = 0.45   # 抽取式天然高；LLM 生成低于此值说明在编

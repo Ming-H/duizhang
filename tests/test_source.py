@@ -56,7 +56,7 @@ def test_incremental_add_modify_delete(tmp_path):
     seed = work / "corpus"
     seed.mkdir()
     shutil.copy(repo / "samples" / "欧科亿_2026年半年度业绩预告.pdf", seed)
-    _touch(seed / "notes.md", "欧科亿 业绩预告 预计净利润 36,000 万元")
+    _touch(seed / "欧科亿_备注.md", "欧科亿 业绩预告 预计净利润 36,000 万元")
 
     out1 = _ingest_once(repo, work, seed)
     assert "+1 新增" in out1 or "+2 新增" in out1
@@ -66,12 +66,12 @@ def test_incremental_add_modify_delete(tmp_path):
     assert "无变化" in out2
 
     # 修改：指纹变 → 更新
-    _touch(seed / "notes.md", "欧科亿 业绩预告 预计净利润 42,000 万元 变更")
+    _touch(seed / "欧科亿_备注.md", "欧科亿 业绩预告 预计净利润 42,000 万元 变更")
     out3 = _ingest_once(repo, work, seed)
     assert "~1 更新" in out3
 
     # 删除：文件没了 → 出库
-    (seed / "notes.md").unlink()
+    (seed / "欧科亿_备注.md").unlink()
     out4 = _ingest_once(repo, work, seed)
     assert "-1 删除" in out4
 

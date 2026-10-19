@@ -71,8 +71,13 @@ def parse_filename(path: str | Path) -> tuple[str, str, str]:
         if m:
             company = pat.sub("", name).rstrip("_－- ")
             return company, f"{m.group(1)}{tag}", _KIND_LABEL[tag]
-    # 兜底：公司_分析 / 裸 txt
+    # 兜底：公司_分析 / 裸 txt。主干必须是可读公司名（含 CJK）——
+    # 日期开头的外部分析（20261009_永和…_CANSLIM分析.md）主干是纯
+    # 数字，静默入库会产出 20261009_MD 这类垃圾 doc_id（污染检索与
+    # 引用）；拒收让 cli 以 ⚠ 跳过（P0.5 实测库内留过一具）
     company = re.split(r"[__－-]", name)[0]
+    if not re.search(r"[一-鿿]", company):
+        raise ValueError(f"文件名解析不出公司名（主干={company!r}），拒收")
     return company, "TXT" if Path(path).suffix.lower() == ".txt" else "MD", "ANALYSIS"
 
 

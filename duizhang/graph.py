@@ -115,12 +115,111 @@ def page_evidence(hits, corpus, top_n: int = 4, window: int = 2,
             continue
         siblings = chunks_page(*key)
         idx = next((i for i, c in enumerate(siblings)
-                    if c.chunk_id == h.chunk.chunk_id), 0)
+                    if c.chunk_id == h.chunk.chunk_id), None)
+        if idx is None:                  # 合成块（拼接行）不在语料：整块进上下文
+            out.append(h.chunk)
+            continue
         for c in siblings[max(0, idx - window): idx + window + 1]:
             if len(out) >= cap:
                 return out
             out.append(c)
     return out
+
+
+def stitch_adjacent(hits, corpus=None) -> list:
+    """同页相邻表块拼接（D16+B2）：PDF 主要会计数据表会把「口径标签
+    块」与「光数值块」切成相邻块（2025Q1 扣非：seq4 标签 / seq5 数值
+    1,568,385,287.19）。光数值块零词面、检索召不回；标签块无数字、句级
+    打分强降权——问扣非时被页 10 的「标签+数字齐全」归母行抢答
+    （1,582,876,128.67 顶掉 1,568,385,287.19）。命中块与同页相邻块
+    在页内 seq 序上互补（一侧纯标签、一侧纯数值）时拼成整行再进生成。
+    完整行不受影响；无 chunks_page 能力时原样返回。"""
+    from duizhang.schemas import Retrieved as _R
+    get_page = getattr(corpus, "chunks_page", None) if corpus else None
+    if not get_page:
+        return list(hits)
+
+    def _cjk_len(t: str) -> int:
+        return len(re.findall(r"[一-鿿]", t))
+
+    def _is_label(t: str) -> bool:      # 无数字且指标词足够长
+        return not re.search(r"\d", t) and _cjk_len(t) >= 6
+
+    def _is_bare_nums(t: str) -> bool:  # 光数值：有 3 位以上数字且零汉字
+        return bool(re.search(r"\d{3}", t)) and _cjk_len(t) == 0
+
+    out, used = [], set()
+    for h in hits:
+        ch = h.chunk if hasattr(h, "chunk") else h
+        if ch.chunk_id in used:
+            continue
+        new_chunk = None
+        if ch.page and (_is_label(ch.text) or _is_bare_nums(ch.text)):
+            sibs = sorted(get_page(ch.doc_id, ch.page), key=lambda c: c.seq)
+            idx = next((i for i, c in enumerate(sibs)
+                        if c.chunk_id == ch.chunk_id), None)
+            for j in ((idx - 1) if idx else None,
+                      (idx + 1) if idx is not None and idx + 1 < len(sibs) else None):
+                if j is None:
+                    continue
+                nb = sibs[j]
+                if nb.chunk_id in used or nb.chunk_id == ch.chunk_id:
+                    continue
+                if (_is_label(ch.text) and _is_bare_nums(nb.text)) or \
+                        (_is_bare_nums(ch.text) and _is_label(nb.text)):
+                    label, nums = (ch, nb) if _is_label(ch.text) else (nb, ch)
+                    from duizhang.schemas import Chunk as _C
+                    new_chunk = _C(
+                        chunk_id=f"{label.chunk_id}~{nums.chunk_id}",
+                        doc_id=label.doc_id, page=label.page, seq=label.seq,
+                        text=f"{label.text} {nums.text}",
+                        num_notes=nums.num_notes)
+                    used.add(nb.chunk_id)
+                    break
+        target = new_chunk or ch
+        out.append(_R(chunk=target, score=getattr(h, "score", 0.0),
+                      rank=getattr(h, "rank", 0))
+                   if hasattr(h, "chunk") else target)
+        if new_chunk:
+            used.add(ch.chunk_id)
+    return out
+
+
+_FRONT_CAP = 8   # 前置封顶：主要会计数据行集中在页首（前 8 块覆盖营收/归母/扣非/每股）
+
+
+def front_key_table(hits, u, query, corpus, cap: int = _FRONT_CAP) -> list:
+    """metric 意图：主要会计数据表页前置（D14 封顶版）——真值行常被
+    无数字表头块挤出前排（词面匹配更强，实测 5,171,485,967 行排 #6 而
+    表头占 #1#2），0.8b 从分季度表抓单季数当全年。前置后 LLM 证据头部
+    即真值行（trend 同款哲学）。D14 两条收口：①前置块数封顶 cap——
+    整页前置（长页 12+ 块）会淹没 Agent 自己收集的证据，真值行集中在
+    页首；②归因题（原因/为什么/为何/变动）跳过——要叙事证据句，
+    表格行前置只会挤掉归因句。"""
+    if u.get("intent") != "metric" or not hits:
+        return hits
+    if any(w in query for w in ("原因", "为什么", "为何", "变动")):
+        return hits
+    comps = [c for c in (u.get("companies") or []) if c]
+    comp0 = comps[0] if len(comps) == 1 else ""
+    years = query_years(query)
+    scope = {d for d, doc in corpus.docs.items()
+             if (not comp0 or doc.company == comp0)
+             and (not u.get("period") or u["period"] in doc.period)
+             and (not years or doc.period[:4] in years)} or None
+    probe = corpus.search("主要会计数据", k=2, doc_filter=comp0,
+                          doc_scope=scope)
+    from duizhang.schemas import Retrieved
+    key_page_chunks: list = []
+    get_page = getattr(corpus, "chunks_page", None)
+    if probe and get_page:
+        kdoc, kpage = probe[0].chunk.doc_id, probe[0].chunk.page
+        key_page_chunks = [
+            Retrieved(chunk=c, score=0.3, rank=i)
+            for i, c in enumerate(get_page(kdoc, kpage)[:cap])]
+    probe_ids = {c.chunk.chunk_id for c in key_page_chunks}
+    return key_page_chunks + [h for h in hits
+                              if h.chunk.chunk_id not in probe_ids]
 
 
 def _parse_metric_row(text: str) -> tuple[str, str] | None:
@@ -175,6 +274,12 @@ def trend_skeleton(hits, corpus=None) -> str:
                         break
                 for sent in ans._sentences(c_text):
                     if require not in sent:
+                        continue
+                    # 口径守卫（D16）：含「扣除/扣非」的是另一口径，词面
+                    # 同样含「净利润」，先到先得会拿扣非数当归母（实测
+                    # 15.7 亿顶掉 15.8 亿）。默认口径=归母；要求扣非口径
+                    # 时 require 自身含「扣非」。
+                    if ("扣除" in sent or "扣非" in sent) and "扣非" not in require:
                         continue
                     if not re.search(r"\d", sent):
                         continue
@@ -258,6 +363,11 @@ def period_hints(query: str) -> list[str]:
     顺序 if 会让 FY 混进半年度问题的 hints，期间硬过滤随之失效
     （2026-10-14 全量库实测：问 2026 半年度，命中 2025FY:5 / 2026H1E:2）。
     季度口语映射按财报日历：二季度→H1（半年报）、四季度→FY（年报）。
+    D18 裸年份→FY：只有年份没有期间词时默认年报口径（「2025 年营收」
+    = 2025FY）。此前 hints 为空 → 期间不限定 → Q1/H1 的数顶掉年报数
+    （2026-10-19 innolight 库 6 处失败共同根因）。年份判定复用
+    query_years（含口语二位「15年」）；该公司无 FY 文档时消费端
+    回退未过滤结果（retrieve 的 allowed 为空分支），不会误拒。
     """
     if any(w in query for w in ("半年度", "半年报", "中报", "二季度", "上半年", "H1")):
         return ["H1"]
@@ -266,6 +376,8 @@ def period_hints(query: str) -> list[str]:
     if "三季" in query or "Q3" in query:
         return ["Q3"]
     if "年度" in query or "年报" in query or "四季度" in query or "全年" in query:
+        return ["FY"]
+    if query_years(query):
         return ["FY"]
     return []
 
@@ -288,7 +400,8 @@ def make_nodes(corpus: Corpus):
                     '"reason":"一句话"}\n'
                     "规则：companies 原样取自问题中的公司名（没有则空数组）；"
                     "period 按财报日历（一季度/一季报/Q1→Q1，半年度/中报/二季度→H1，"
-                    "三季→Q3，年度/年报/四季度→FY，未提及则空串）；"
+                    "三季→Q3，年度/年报/四季度→FY，仅提年份不提期间"
+                    "（如「2025 年营收」）也算 FY，未提及则空串）；"
                     "intent：metric=问具体数字/指标/事实/原因/归因（需要检索证据句），"
                     "trend=跨期趋势/多期对比（最近几个季度/近几年的指标变化；"
                     "问投资建议也归 trend，用数据回答），"
@@ -482,6 +595,10 @@ def make_nodes(corpus: Corpus):
 
     def generate(state: GraphState) -> GraphState:
         hits = state["hits"]
+        # 表块拼接（D16+B2）：metric 意图下把同页「口径标签块+光数值块」
+        # 拼成整行——检索只召回标签块，光数值块（真值）永远不在场
+        if (state.get("understanding") or {}).get("intent") == "metric":
+            hits = stitch_adjacent(hits, corpus)
         # 页级证据（small-to-big）：命中块 ±2 窗口的兄弟块一并进入
         # 生成与校验的视野——检索精度不动，上下文在生成侧补全
         page_chunks = page_evidence(hits, corpus)
@@ -521,8 +638,9 @@ def make_nodes(corpus: Corpus):
             if analysis:
                 body = f"{body}\n\n分析：{analysis}"
             body += "\n（以上为财报事实梳理，不构成投资建议）"
-            cited = list(dict.fromkeys(
-                h.chunk.citation for h in hits if h.chunk.citation))
+            # 引用收窄：列表 = 答案文本里实际出现的引用——此前 cite 全部
+            # hits（含骨架没采用行的期间/页），引用虚胖且不可回溯到答案
+            cited = list(dict.fromkeys(re.findall(r"\[[^\]]+\]", body)))
             ev, seen_docs = [], set()
             for h in hits:
                 if h.chunk.doc_id in seen_docs:
@@ -561,6 +679,11 @@ def make_nodes(corpus: Corpus):
                     "引用问题所问的那个。问「净利润」而未提扣非时，默认指"
                     "归属于上市公司股东的净利润（非扣非口径）。PDF 断行时它显示为"
                     "「的净利润（元）」开头的数据行，取该行的本期值（第一列数字）。"
+                    "反之，问句明确要「扣非/扣除非经常性损益」时，必须取"
+                    "「归属于上市公司股东的扣除非经常性损益的净利润」那一行"
+                    "的本期值——「净利润（元）」行是归母口径，数值相近但不同"
+                    "（0.8b 实测拿 1,582,876,128.67 答扣非题，真值"
+                    " 1,568,385,287.19）。"
                     "确实无任何"
                     "相关数字才回答「原文中没有找到依据」。",
                     f"问题：{state['query']}\n\n证据：\n{evidence}")
@@ -568,9 +691,11 @@ def make_nodes(corpus: Corpus):
                     "没有找到依据", "未找到依据", "未找到相关", "无法从",
                     "无法确定", "无法回答")) or len(out.strip()) < 15
                 if not no_evidence:
+                    # 引用匹配空白不敏感（D13）：模型手写空格漂移
+                    # （第 8 页/粘连）不该丢掉引用列表
                     cited = list(dict.fromkeys(
                         h.chunk.citation for h in hits[:8]
-                        if h.chunk.citation in out))
+                        if ans.citation_in(out, h.chunk.citation)))
                     return {**state, "answer": out, "citations": cited,
                             "evidence": page_chunks, "trace": ["generate:llm"]}
                 # LLM 判无据 → 降级抽取式（永远有真凭实据），而非拒答——
@@ -580,6 +705,7 @@ def make_nodes(corpus: Corpus):
                 fallback = ["generate:llm→fallback"]
         body, cited = ans.extractive_answer(state, hits)
         return {**state, "answer": body, "citations": cited,
+                "hits": hits,       # 拼接行进 verify 证据池，口径一致
                 "evidence": page_chunks,
                 "trace": fallback + ["generate:extractive"]}
 
@@ -778,31 +904,8 @@ def make_nodes(corpus: Corpus):
                 if r < len(chunks) and len(hits_out) < TOP_K:
                     hits_out.append(chunks[r])
             r += 1
-        # metric 意图：主要会计数据表前置——真值行常被无数字表头块
-        # 挤出前排（词面匹配更强，实测 5,171,485,967 行排 #6 而表头
-        # 占 #1#2），0.8b 从分季度表抓单季数当全年。关键指标表前置
-        # 后 LLM 证据头部即真值行（trend 同款哲学）
-        if u.get("intent") == "metric" and hits_out:
-            comps = [c for c in (u.get("companies") or []) if c]
-            comp0 = comps[0] if len(comps) == 1 else ""
-            years = query_years(state["query"])
-            scope = {d for d, doc in corpus.docs.items()
-                     if (not comp0 or doc.company == comp0)
-                     and (not u.get("period") or u["period"] in doc.period)
-                     and (not years or doc.period[:4] in years)} or None
-            probe = corpus.search("主要会计数据", k=2, doc_filter=comp0,
-                                  doc_scope=scope)
-            from duizhang.schemas import Retrieved
-            key_page_chunks = []
-            get_page = getattr(corpus, "chunks_page", None)
-            if probe and get_page:
-                kdoc, kpage = probe[0].chunk.doc_id, probe[0].chunk.page
-                key_page_chunks = [
-                    Retrieved(chunk=c, score=0.3, rank=i)
-                    for i, c in enumerate(get_page(kdoc, kpage))]
-            probe_ids = {c.chunk.chunk_id for c in key_page_chunks}
-            hits_out = key_page_chunks + \
-                [h for h in hits_out if h.chunk.chunk_id not in probe_ids]
+        # metric 意图：主要会计数据表前置（封顶+归因跳过，见 front_key_table）
+        hits_out = front_key_table(hits_out, u, state["query"], corpus)
         eff = state.get("effective_query", state["query"])
         for q in agent_queries:
             if q not in eff:
@@ -835,9 +938,12 @@ def make_nodes(corpus: Corpus):
 
     def verify_citations(state: GraphState) -> GraphState:
         a = state.get("answer", "")
-        # 证据池用页级集合（同页窗口块 citation 串相同，被引池自动扩到
-        # 整页窗口）——跨块半句不再误降级
-        verdict, cov = ans.verify(a, state.get("evidence") or state.get("hits", []))
+        # 证据池 = 页级集合 ∪ hits（同页窗口块 citation 串相同，被引池
+        # 自动扩到整页窗口）——跨块半句不再误降级；页窗口只装 hits[:4]
+        # 的页而 extractive 从 hits[:8] 抽句，rank 5–8 的被引块（拼接行
+        # 常排中段）必须也在池里，否则正确答案被误标 degraded
+        pool = list(state.get("evidence") or []) + list(state.get("hits", []))
+        verdict, cov = ans.verify(a, pool)
         if verdict == "pass":
             return {**state, "verdict": "pass", "trace": [f"verify:pass({cov})"]}
         if verdict == "refused":
