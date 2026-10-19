@@ -120,9 +120,9 @@ Q1 净利润证据 → 对比作答。历史修复记录见 `docs/DESIGN-v0.4.md
 `docs/DESIGN-v0.5.md`、`docs/DESIGN-v0.6.md` §7（innolight 真值驱动
 四组修复：裸年份→FY/引用格式解耦/口径行抽取/前置封顶）。
 
-单元测试（77 用例：分块/理解/守卫/纠错环/分解/Store 幽灵块/多根摄取/
+单元测试（85 用例：分块/理解/守卫/纠错环/分解/Store 幽灵块/多根摄取/
 对账口径/引用漂移/表块拼接/口径守卫/前置封顶/裸年份/拒收闸/
-思考分层/.env，conftest 封网永不外呼）：
+思考分层/.env/向量可选路（缺依赖退双轨）/评测指标，conftest 封网永不外呼）：
 
 ```bash
 pip install -r requirements-dev.txt
@@ -152,8 +152,8 @@ duizhang/
 ├── llm.py          # LLM 层：智谱 GLM 默认，.env 装载，思考分层，任意兼容端点可换
 ├── evalx.py        # 评估 runner（judge 纯函数；default/agent/innolight 三数据集）
 └── cli.py          # ingest / index / ask / eval / docs
-tests/              # 77 用例（conftest 封网：永不外呼 LLM）
-evals/              # default 10 题 + agent 8 题（多跳对比）+ innolight 19 题（真值）
+tests/              # 85 用例（conftest 封网：永不外呼 LLM）
+evals/              # default 10 题 + agent 8 题（多跳对比）+ innolight 31 题（真值）
 samples/            # 3 家公司 5 份真实财报（巨潮）
 docs/               # 设计文档 ×4 + EXPLAINER + TEST-CASES 测试手册 + 流程动效图
 .env                # 密钥（gitignored，永不进 git）

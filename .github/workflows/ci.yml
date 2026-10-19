@@ -33,9 +33,9 @@ jobs:
           python -m duizhang.cli eval
 
       # innolight 真值冒烟：随 git 入库的 26MB 中际旭创语料（10 docs /
-      # 7,873 chunks）从死重变承重墙——19 题真值（事实/趋势/陷阱/鲁棒）
+      # 7,873 chunks）从死重变承重墙——31 题真值（事实/趋势/陷阱/鲁棒）
       # 每道都是人工核对过的原文数字。干净库全流程本地实测 ~2:40。
-      - name: 冒烟：innolight 真值集（data/中际旭创 19 题）
+      - name: 冒烟：innolight 真值集（data/中际旭创 31 题）
         env:
           DZ_DB: /tmp/innolight.db
         run: |
