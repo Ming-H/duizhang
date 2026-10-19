@@ -100,7 +100,7 @@ START → understand ──→ route ──metric/compare(llm)──→ 【agent
 | agent（3 对比 + 3 单跳/摘要 + 2 陷阱） | heuristic | 1.00 | 1.00 | 1.00 |
 | agent | **llm（qwen3.5:0.8b 本地，Agent 环）** | **1.00** | **1.00** | **1.00** |
 | agent | llm（glm-5.3 远端，对照） | 1.00 | 1.00 | 1.00 |
-| innolight（19 题真值：事实/趋势/陷阱/鲁棒） | heuristic | 1.00 | 1.00 | 1.00 |
+| innolight（31 题真值：事实/趋势/陷阱/鲁棒） | heuristic | 1.00 | 1.00 | 1.00 |
 | innolight | **llm（qwen3.5:0.8b 本地，Agent 环）** | **1.00** | **1.00** | **1.00** |
 
 **语料分工**：`samples/`（3 家公司 5 份财报，演示与 CI 回归）；
@@ -114,7 +114,8 @@ START → understand ──→ route ──metric/compare(llm)──→ 【agent
 自动降级为抽取式作答——agent 集满分的含金量在「理解+检索+闸门」，
 不在生成模型。glm-5.3（远端对照）走 GLM Coding Plan 的 Anthropic
 兼容端点；heuristic 模式可复现无方差。陷阱题两类：未来期间（2030）与领域外（天气）——都必须拒答。
-多跳对比题示例：`对比欧科亿和海伦哲 2026 一季度谁赚得多` → 分解检索两家
+评估新增 faithfulness（pass 率/平均覆盖率 1.00/0.94）与 chunk 级 P/R@8
+（0.148/0.926，P 的差距=前排噪声靶子）。多跳对比题示例：`对比欧科亿和海伦哲 2026 一季度谁赚得多` → 分解检索两家
 Q1 净利润证据 → 对比作答。历史修复记录见 `docs/DESIGN-v0.4.md` §5、
 `docs/DESIGN-v0.5.md`、`docs/DESIGN-v0.6.md` §7（innolight 真值驱动
 四组修复：裸年份→FY/引用格式解耦/口径行抽取/前置封顶）。
@@ -167,7 +168,8 @@ docs/               # 设计文档 ×4 + EXPLAINER + TEST-CASES 测试手册 + �
 
 ## Roadmap
 
-- [ ] 向量检索可选后端（bge-small-zh，HF mirror），与词法双路 RRF
+- [x] ~~向量检索可选后端（bge-small-zh @ fastembed），与词法双路 RRF~~
+  （消融结论 DESIGN-v0.6 §8.3：数字/口径题净负贡献，默认关，DZ_VEC=on opt-in）
 - [x] ~~多公司对比（v0.5 compare 分解）~~
 - [ ] 跨期对比（「2025 vs 2026 毛利率变化」→ 按期间分解）
 - [ ] rerank 层（LLM 或 cross-encoder 可切换）

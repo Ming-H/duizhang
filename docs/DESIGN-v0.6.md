@@ -317,3 +317,56 @@ hits，与 coverage 层「cited beyond rank4 必须计数」同哲学。
 
 测试 77 全绿（今日 +10：裸年份/引用漂移/口径×2/拼接/前置封顶/
 verify 池/trend 引用/归母映射/拒收闸），ruff 干净。
+
+## 8. P1 批次（2026-10-19 晚）：CI 承重、评测扩容、向量消融
+
+### 8.1 CI innolight 冒烟
+
+ci.yml 加一步：干净库 ingest data/中际旭创 → eval --dataset innolight
+（heuristic 零 key）。随 git 的 26MB 语料从死重变承重墙——真值集回归
+从此每次 push 都跑。本地实测全流程 2:40（FTS 建 + 31 题评估）。
+
+### 8.2 评测扩容 19→31 题 + chunk P/R + faithfulness
+
+- innolight 新增 12 道题（全部 SQL 实测核对真值）：跨期间补面
+  （2024FY/H1、2025H1/Q3、2026Q1/H1、期末资产/每股）、口语变体
+  （中报/半年报/二位年份+扣非缩写）、陷阱（2022：数字在 2024FY
+  对照列里存在但期间文档不在库 → 拒）。三数据集总量 49 题。
+- **faithfulness**：非拒答题中 verify pass 占比 + 平均引用覆盖率
+  （coverage 自本批起写入 GraphState）。31 题基线 1.00 / 0.94。
+- **chunk 级 P/R@8**（操作性定义）：真值承载块 = doc ∈ expect_docs
+  且 text 含任一 expect_keywords；P = top-8 占比（噪声下界），
+  R = 命中即 1（无全量 relevant 标注，是命中率下界）。基线
+  0.148 / 0.926——P 的差距就是「检索把多少无关块排进了前排」，
+  后续检索优化的靶子。
+- 顺带两修：净资产题暴露「者权益（元）」断词（_SPLIT_FIX 补映射）
+  与净资产→所有者权益同义缺失（METRIC_SYNONYMS 补双映射）。
+
+### 8.3 向量三路 RRF：实现 + 消融 + 默认关（D19）
+
+**实现**（可选依赖 requirements-vec.txt：fastembed/ONNX 免 torch，
+bge-small-zh-v1.5，512 维）：vecs/vecmeta 表经 Store 唯一写入口
+（drop_doc 级联清向量=幽灵向量防线；换模型全量作废）；CLI `embed`
+增量嵌入（8,183 块实测幂等秒回）；fts.search 增 extra_ranking 第三
+排名进 RRF（k=60 同律）；embed.ranking 查询侧 doc_scope 过滤后内存
+cosine。万级块 ~16MB 数十 ms；百万级需 sqlite-vec/faiss（只动 embed
+模块，融合协议不变）。
+
+**消融（31 题真值集 + default/agent，heuristic 确定性对照）**：
+
+| 数据集 | 双轨 answer_hit | 三路 answer_hit | chunk P/R@8 双轨 | 三路 |
+|---|---|---|---|---|
+| default 10 | **1.00** | 0.875 | 0.261/0.875 | 0.212/0.875 |
+| agent 8 | **1.00** | 0.833 | 0.295/0.833 | 0.312/0.833 |
+| innolight 31 | **1.00** | 0.926 | 0.148/0.926 | 0.185/0.852 |
+
+**结论（D19）**：财报数字/口径任务是**精确词面任务**，词法双轨已
+饱和（1.00×3）；bge 语义泛化把「同文档语义相近但口径不同」的块
+拉近，挤掉精确命中（被害题全是我们为口径守卫修过的类型：25 年
+年报营收、同比增长、归因句）。**默认关闭，DZ_VEC=on 显式 opt-in**
+——installed()（依赖在否，CLI embed 用）与 enabled()（查询路开关）
+分离。语义问法场景（为什么/怎么样/跨文档摘要）是否受益是后续实验，
+不是今天的假设。
+
+（工程注：消融跑分当天 venv 所指 anaconda 被并发删除导致环境崩，
+改用 uv 托管 CPython 3.12 重建，与 anaconda 解耦。）
