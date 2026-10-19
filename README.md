@@ -100,6 +100,15 @@ START → understand ──→ route ──metric/compare(llm)──→ 【agent
 | agent（3 对比 + 3 单跳/摘要 + 2 陷阱） | heuristic | 1.00 | 1.00 | 1.00 |
 | agent | **llm（qwen3.5:0.8b 本地，Agent 环）** | **1.00** | **1.00** | **1.00** |
 | agent | llm（glm-5.3 远端，对照） | 1.00 | 1.00 | 1.00 |
+| innolight（19 题真值：事实/趋势/陷阱/鲁棒） | heuristic | 1.00 | 1.00 | 1.00 |
+| innolight | **llm（qwen3.5:0.8b 本地，Agent 环）** | **1.00** | **1.00** | **1.00** |
+
+**语料分工**：`samples/`（3 家公司 5 份财报，演示与 CI 回归）；
+`data/中际旭创/`（10 docs / 7,873 chunks，**随 git 入库 26MB**——
+真值评估集的承重墙：每题答案都是人工核对过的原文数字，脱离这份
+语料 innolight 集不可复现；P1 将加 CI 冒烟让其常驻承重）；
+`data/corpus/`（全量 1,104 docs，本机自备不入 git）。双语料可同库
+共存（多根摄取），上表 innolight 行即 samples+中际旭创 同库跑出。
 
 **架构比模型更保命**：0.8b 本地小模型的生成质量不足时，verify 闸门
 自动降级为抽取式作答——agent 集满分的含金量在「理解+检索+闸门」，
@@ -107,10 +116,12 @@ START → understand ──→ route ──metric/compare(llm)──→ 【agent
 兼容端点；heuristic 模式可复现无方差。陷阱题两类：未来期间（2030）与领域外（天气）——都必须拒答。
 多跳对比题示例：`对比欧科亿和海伦哲 2026 一季度谁赚得多` → 分解检索两家
 Q1 净利润证据 → 对比作答。历史修复记录见 `docs/DESIGN-v0.4.md` §5、
-`docs/DESIGN-v0.5.md`。
+`docs/DESIGN-v0.5.md`、`docs/DESIGN-v0.6.md` §7（innolight 真值驱动
+四组修复：裸年份→FY/引用格式解耦/口径行抽取/前置封顶）。
 
-单元测试（52 用例：分块/理解/守卫/纠错环/分解/Store 幽灵块/多根摄取/
-对账口径/思考分层/.env，conftest 封网永不外呼）：
+单元测试（77 用例：分块/理解/守卫/纠错环/分解/Store 幽灵块/多根摄取/
+对账口径/引用漂移/表块拼接/口径守卫/前置封顶/裸年份/拒收闸/
+思考分层/.env，conftest 封网永不外呼）：
 
 ```bash
 pip install -r requirements-dev.txt
@@ -120,7 +131,8 @@ pytest
 ## 用自己的财报
 
 ```bash
-# 任意目录：PDF 按巨潮命名「公司_2025年年度报告.pdf」；也吃 md
+# 任意目录：PDF 按巨潮命名「公司_2025年年度报告.pdf」；md/txt 主干
+# 必须是公司名（公司_分析.md）——解析不出公司名的文件 ⚠ 拒收，不静默入库
 python -m duizhang.cli ingest /path/to/财报目录
 ```
 
@@ -137,10 +149,10 @@ duizhang/
 ├── graph.py        # LangGraph 状态机（understand/route/retrieve/decompose/grade/rewrite/generate/verify）
 ├── answer.py       # 抽取式生成 + 引用覆盖率校验（对账闸门）
 ├── llm.py          # LLM 层：智谱 GLM 默认，.env 装载，思考分层，任意兼容端点可换
-├── evalx.py        # 评估 runner（default/agent 双数据集）
+├── evalx.py        # 评估 runner（judge 纯函数；default/agent/innolight 三数据集）
 └── cli.py          # ingest / index / ask / eval / docs
-tests/              # 52 用例（conftest 封网：永不外呼 LLM）
-evals/              # dataset.json（10 题）+ dataset-agent.json（8 题含多跳对比）
+tests/              # 77 用例（conftest 封网：永不外呼 LLM）
+evals/              # default 10 题 + agent 8 题（多跳对比）+ innolight 19 题（真值）
 samples/            # 3 家公司 5 份真实财报（巨潮）
 docs/               # 设计文档 ×4 + EXPLAINER + TEST-CASES 测试手册 + 流程动效图
 .env                # 密钥（gitignored，永不进 git）

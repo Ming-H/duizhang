@@ -15,18 +15,22 @@ source venv/bin/activate                # Python 3.12; deps already installed
 
 # Ingest & query (auto = llm if key in .env, else heuristic)
 python -m duizhang.cli ingest samples/  # incremental ingest (fingerprint diff; idempotent)
+python -m duizhang.cli ingest samples/ --watch   # poll mode: resync every 60s
 python -m duizhang.cli ask "欧科亿 2026 年半年度预计净利润多少"
 python -m duizhang.cli ask "对比欧科亿和海伦哲 2026 一季度谁赚得多"   # compare → decompose
-python -m duizhang.cli eval                          # default dataset (CI regression)
-python -m duizhang.cli eval --mode llm --dataset agent   # agent dataset (multi-hop; costs API calls)
+python -m duizhang.cli eval                          # default dataset (10 单跳; CI regression)
+python -m duizhang.cli eval --mode llm --dataset agent     # agent dataset (multi-hop; local 0.8b ok)
+python -m duizhang.cli eval --dataset innolight      # 中际旭创真值 14 题（事实/趋势/陷阱/鲁棒）
 python -m duizhang.cli docs             # list ingested docs
 python -m duizhang.cli index            # (re)build FTS for existing chunks
 
 # Tests / lint
-pytest                                  # 52 cases; conftest blocks all real LLM calls
+pytest                                  # 77 cases; conftest blocks all real LLM calls
 pytest tests/test_store.py::test_readd_after_drop_no_ghost   # one test
 ruff check .                            # lint (CI enforces)
 ```
+
+Corpus layout: `samples/` = small demo set; `data/corpus/` = full corpus (1,104 docs / 60.7万 chunks); `data/中际旭创/` = ground-truth corpus for the innolight dataset — ingest the matching directory before running its eval. Eval logic lives in `evalx.py` (`judge()` is a pure function; drop custom datasets into `evals/*.json`).
 
 After changing retrieval/graph/answer code, run `python -m duizhang.cli eval` (heuristic) and verify the three metrics don't regress (full corpus: 1.00/1.00/1.00). Bug fixes follow TDD — failing test first, watch it fail, then fix (DESIGN-v0.4.md §5 and DESIGN-v0.5.md record two such rounds).
 
@@ -36,30 +40,34 @@ Secrets: `DZ_LLM_API_KEY` lives ONLY in `.env` (gitignored; `_load_dotenv` loads
 
 Two planes, one SQLite file (`docs` / `chunks` / `fts_w` / `fts_c` / `manifest`):
 
-**Offline ingest** — `source.py` scans a directory into `{path: mtime_ns-size fingerprint}` and three-way diffs against the `manifest` table (add/update/delete + orphan cleanup scoped to the scan root). `ingest.py` extracts metadata from the filename (巨潮 convention → company/period/kind — never from model guessing), strips repeated header/footer lines (frequency-based, digits stripped in normalization — headers share lines with page numbers), chunks with table-awareness, and appends number-normalization notes (`41,914.72 万元` → `≈4.19亿`) so lexical search hits 「多少亿」-style queries.
+**Offline ingest** — `source.py` scans a directory into `{path: mtime_ns-size fingerprint}` and three-way diffs against the `manifest` table (add/update/delete + orphan cleanup scoped to the scan root). `ingest.py` extracts metadata from the filename (巨潮 convention → company/period/kind — never from model guessing; broker-report naming `日期-券商-公司` also parses; md/txt with a CJK company-name stem ingest as ANALYSIS, **anything else is rejected with ⚠** — a digit-stem like `20261009_…分析.md` used to become garbage doc-id `20261009_MD`), strips repeated header/footer lines (frequency-based, digits stripped in normalization — headers share lines with page numbers), chunks with table-awareness, and appends number-normalization notes (`41,914.72 万元` → `≈4.19亿`) so lexical search hits 「多少亿」-style queries.
 
 **Online QA graph** (`graph.py`) — LangGraph state machine over `GraphState` (narrow-interface TypedDict; `trace` has append semantics):
 
 ```
-START → understand ─→ route ─metric/compare(llm)─→ agent_research（工具循环：单一 search 工具，
+START → understand ─→ route ─metric/compare(llm)──→ agent_research（工具循环：单一 search 工具，
        （LLM 抽取          │                          模型自主迭代检索，步数≤6，幂等缓存+重复收手，
         intent/公司/期间，   │─metric/compare(heuristic)→ retrieve/decompose→grade⇄rewrite  理解先验优先）
-        规则兜底）          │─summary→ summarize_doc        ↓ generate → verify_citations（确定性闸门）
-                            └─other──→ refuse
+        规则兜底）          │─trend（双模式共用）──→ trend_research（确定性遍历最近 6 期，
+                           │─summary→ summarize_doc    「主要会计数据」锚定，时间升序）
+                           │                          ↓ generate → verify_citations（确定性闸门）
+                           └─other──→ refuse
 ```
 
-**Retrieval** (`fts.py` + `index.py`) — dual-track FTS5 + RRF (k=60): word track (jieba + unicode61) and char track (trigram, whitespace-stripped, ≤200 chars — truncates 14.2% of chunks by design, word track covers full text). `understanding` (from the understand node) drives `doc_scope`: exact company match + period restriction at the doc level. `expand_query` maps colloquial terms to report terminology (营收→营业收入, 赚→净利润, 原因→主要系).
+**trend 意图**（v0.6.2）— `trend_research` deterministically walks the company's reporting periods (≤6, chronological — the 0.8b agent left periods out / looped when asked to do it itself), then `trend_skeleton` parses each period into structured rows （营收/归母净利 + 同比 + 引用） and the LLM only narrates (direct multi-period generation by 0.8b contradicted itself — measured). No fact rows → refuse. Two guards: query must contain a trend word or intent downgrades to metric (0.8b hallucinated trend for 「预计…多少」); rule layer overrides when the LLM misjudges trend as summary. Multi-period evidence still exits through generate→verify.
+
+**Retrieval** (`fts.py` + `index.py`) — dual-track FTS5 + RRF (k=60): word track (jieba + unicode61) and char track (trigram, whitespace-stripped, ≤200 chars — truncates 14.2% of chunks by design, word track covers full text). `understanding` (from the understand node) drives `doc_scope`: exact company match + period restriction at the doc level (period *type* + *year* — `query_years` extracts 20xx and colloquial two-digit years 「15年」→2015, must be followed by 年 to avoid amount false-positives). `expand_query` maps colloquial terms to report terminology (营收→营业收入, 赚→净利润, 原因→主要系). Generation context is assembled by `page_evidence` (small-to-big, DESIGN-v0.6 §5.3: dedup top-hit pages → ±2 sibling-chunk window → hard cap); metric intent additionally fronts the 「主要会计数据」 table page (truth rows lose lexical fights to number-less header chunks — measured).
 
 ### Invariants — violate these and you reintroduce past bugs
 
 1. **`Store` (`store.py`) is the ONLY writer to the four tables.** fts rowids align to `chunks.rowid`; re-add = drop-then-insert (never `INSERT OR REPLACE` on chunks). `chunks(doc_id)` is indexed in SCHEMA (legacy DBs auto-migrate on next Store open). `tests/test_store.py` is the permanent regression guard.
 2. **One graph, two brains.** Every LLM decision point falls back to rules on failure **with a trace marker** (`understand:llm→fallback` etc.). `--mode auto` resolves at `new_state`: llm if key present, else heuristic. Tests never make real LLM calls (conftest strips the key).
-3. **The corrective loop is bounded** (`MAX_RETRIES = 1` heuristic; `MAX_AGENT_STEPS = 6` for the agent loop). llm-mode metric/compare route into `agent_research` (single search tool; the model iterates autonomously). Guardrails the loop needs with small models (all measured, DESIGN-v0.6.md): idempotent call cache + early stop on all-repeat batches; understanding priors OVERRIDE tool args for period (0.8b hallucinates FY) and backfill company/period when omitted; agent search terms are written into `effective_query`; evidence pool emits round-robin by doc. Agent-collected evidence still goes through generate→verify — autonomy never exempts the gate.
-4. **Refusal over fabrication.** Gates: period guard in `route` (year from doc metadata, not the model); doc-level period filter (`period_hints` is mutually exclusive — "半年度" contains "年度", substring-ordered ifs let FY leak, round-4 bug R-1); `verify_citations` (evidence pool = cited chunks incl. num_notes, meta-token-filtered both sides, numeric sentences only, newline-aware splitting; < 0.45 → degrade to extractive; LLM no-evidence → extractive, not refuse).
+3. **The corrective loop is bounded** (`MAX_RETRIES = 1` heuristic; `MAX_AGENT_STEPS = 6` for the agent loop). llm-mode metric/compare route into `agent_research` (single search tool; the model iterates autonomously); trend never enters the loop (deterministic walk, both modes). Guardrails the loop needs with small models (all measured, DESIGN-v0.6.md): idempotent call cache + early stop on all-repeat batches; understanding priors OVERRIDE tool args for period (0.8b hallucinates FY) and backfill company/period when omitted; agent search terms are written into `effective_query`; evidence pool emits round-robin by doc. Agent-collected evidence still goes through generate→verify — autonomy never exempts the gate.
+4. **Refusal over fabrication.** Gates: period guard in `route` (year from doc metadata, not the model); doc-level period filter (`period_hints` is mutually exclusive — "半年度" contains "年度", substring-ordered ifs let FY leak, round-4 bug R-1; bare year + no period word → FY since D18); `verify_citations` (evidence pool = page-level set **∪ hits** — page windows only cover hits[:4] while extractive quotes hits[:8]; citation matching is whitespace-normalized since D13 — small-model citation formats drift 「第 8 页」; cited chunks incl. num_notes, meta-token-filtered both sides, numeric sentences only, newline-aware splitting; < 0.45 → degrade to extractive; LLM no-evidence → extractive, not refuse). Metric caliber is guarded at three layers since D16 (`stitch_adjacent` re-joins same-page label/number table chunks; trend `pick()` and extractive scoring both refuse 扣非 rows unless the query asks 扣).
 5. **SQLite PRAGMAs are per-connection** (`fts._apply_pragmas` every search; Store sets WAL + synchronous=NORMAL; `store.analyze()` after changed ingests).
 6. **Multi-root ingest**: deletion/orphan cleanup scoped to the scan root (`under_root` in `cli.py`). `--rebuild` still wipes everything.
 7. **Thinking is tiered** (`llm._thinking_off`): structured calls off (cheap enums), generation on (number association on fragmented table evidence needs it; flash without thinking quotes increase-ranges as metric values). The `extra_body.thinking` param is sent ONLY to bigmodel endpoints.
 
 ## Docs
 
-`docs/DESIGN-v0.5.md` is the authority on the agentic layer (decision records D1–D6); `DESIGN-v0.4.md` on retrieval/write architecture (§5 = round-4 review), `DESIGN-scale.md` capacity, `EXPLAINER.md` narrated walkthrough. Design docs record *why* — check before re-litigating, update when architecture changes. `docs/plans/` holds implementation plans.
+`docs/DESIGN-v0.6.md` is the authority on the agent loop & small-model guardrails (decision records D9–D12) and the trend layer; `DESIGN-v0.5.md` on the agentic foundations (D1–D6); `DESIGN-v0.4.md` on retrieval/write architecture (§5 = round-4 review), `DESIGN-incremental.md` on incremental ingest, `DESIGN-scale.md` capacity, `EXPLAINER.md` narrated walkthrough. `TEST-CASES.md` is the test-case manual (four test layers / acceptance cases / trace reading); `RAG-EVAL-CASES.md` covers eval-set design. Design docs record *why* — check before re-litigating, update when architecture changes. `docs/plans/` holds implementation plans.
