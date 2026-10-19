@@ -89,7 +89,12 @@ def query_years(query: str) -> set[str]:
     """query 中出现的年份（20xx）。doc_scope 的年份维度：期间过滤此前
     只有类型（Q1/H1/FY）没有年份——三年语料实测问 2025Q1 时 2024Q1/
     2026Q1 的块混排进答案。"""
-    return {y for y in re.findall(r"(20\d{2})", query)}
+    years = {y for y in re.findall(r"(20\d{2})", query)}
+    # 口语二位年份：「15年中报」= 2015——要求紧跟「年」字，金额/编号
+    # 不误判（实测 15 年中报静默答成 2025）
+    years |= {"20" + m for m in
+              re.findall(r"(?<!\d)(1[5-9]|2\d)(?=\s*年)", query)}
+    return years
 
 
 def page_evidence(hits, corpus, top_n: int = 4, window: int = 2,
@@ -356,6 +361,12 @@ def make_nodes(corpus: Corpus):
             if u.get("intent") == "metric" and any(
                     w in q for w in ("股价", "会涨", "会跌", "涨停", "跌停")):
                 u["intent"] = "other"
+            # 管理层叙述守卫：「管理层怎么说/怎么讲」是问 MD&A 叙述内容，
+            # 0.8b 偶发判 other 拒答（实测）——有报告词在场时归 summary
+            if (u.get("intent") == "other"
+                    and any(w in q for w in ("管理层", "董事长", "怎么说的", "怎么讲"))
+                    and any(w in q for w in ("中报", "年报", "季报", "报告", "财报"))):
+                u["intent"] = "summary"
         return {**state, "understanding": u, "trace": trace}
 
     def route(state: GraphState) -> GraphState:
@@ -366,7 +377,9 @@ def make_nodes(corpus: Corpus):
         u = state.get("understanding") or rule_understand(q, corpus)
         intent = u.get("intent", "metric")
         # 期间守卫：query 里的年份若库中全无对应报告，先对账再回答——拒。
-        q_years = {y for y in re.findall(r"(20\d{2})", q)}
+        # 年份统一走 query_years（含二位口语年份「15年」→2015，此前
+        # 此处内联正则只认 20xx，用户实测 15 年中报静默答了别的年份）
+        q_years = query_years(q)
         have_years = {d.period[:4] for d in corpus.docs.values() if d.period[:4].isdigit()}
         if q_years and not (q_years & have_years):
             periods = "、".join(sorted({d.period for d in corpus.docs.values()}))
@@ -598,30 +611,50 @@ def make_nodes(corpus: Corpus):
                 break
         if target is None:
             return refuse(state)
-        # 要点种子双检索：目标选择的命中块 + 内容词检索（「总结/年报」
-        # 词元天然锚不中经营分析——种子查询用财务关键词，范围锁定目标
-        # 文档）。长报告（184-236 页）的经营分析在第 10 页后，文档头部
-        # 12 块是封面/董事名录（茅台 102 页实测要点为空）
+        # 要点种子三源：MD&A 章节锚 + 关键指标检索 + 原命中块。
+        # 「管理层怎么说/总结」要的是叙述性内容——MD&A（经营情况讨论
+        # 与分析）是唯一可靠章节锚，泛关键词种子此前命中封面/回购明细
+        # 表（实测）；长报告头部 12 块是封面/名录（茅台实测空要点）
+        mda_probe = corpus.search("经营情况讨论 与分析 管理层", k=2,
+                                  doc_filter=filt, doc_scope={target})
+        mda_seed = []
+        get_page = getattr(corpus, "chunks_page", None)
+        if mda_probe and get_page and mda_probe[0].chunk.page:
+            m = mda_probe[0].chunk
+            mda_seed = get_page(m.doc_id, m.page)[1:7] \
+                + get_page(m.doc_id, m.page + 1)[:6]
         company0 = (companies or [""])[0]
         probe = expand_query(f"{company0} 主要会计数据 营业收入 净利润 同比")
         seed_hits = corpus.search(probe, k=6, doc_filter=filt,
                                   doc_scope={target})
-        seed = [h.chunk for h in seed_hits][:6] \
+        seed = mda_seed + [h.chunk for h in seed_hits][:6] \
             + [h.chunk for h in hits if h.chunk.doc_id == target][:6]
         seen_ids = set()
         seed = [c for c in seed if not (c.chunk_id in seen_ids or seen_ids.add(c.chunk_id))]
         doc_chunks = seed + [c for c in corpus.chunks_of(target, limit=12)
                              if c.chunk_id not in seen_ids]
         head = corpus.docs[target]
-        key_lines = []
+        # 打分选行（替代关键词命中即收）：叙事动词加分、表头/会计政策
+        # 残渣强减分——「净利润（元）」表头含关键词却无值（实测混入）
+        _JUNK_PAT = re.compile(r"（元）\s*$|终止经营|少数股东|抵销|综合收益|"
+                               r"会计准则|净亏损以|按所有权")
+        _NARR_PAT = re.compile(r"实现|增长|下降|主要系|管理层|公司认为|"
+                               r"报告期|展望|同比|预计")
+        scored_lines = []
         for c in doc_chunks:
-            for s in ans._sentences(c.text):
-                if any(w in s for w in ("营业收入", "净利润", "同比", "增长", "下降", "预计")):
-                    key_lines.append(f"{s} {c.citation}")
-                if len(key_lines) >= 5:
-                    break
-            if len(key_lines) >= 5:
-                break
+            for sent in ans._sentences(c.text):
+                if _JUNK_PAT.search(sent):
+                    continue
+                sc = 1.0
+                if _NARR_PAT.search(sent):
+                    sc += 2
+                if re.search(r"\d", sent):
+                    sc += 1
+                if any(w in sent for w in ("营业收入", "净利润")):
+                    sc += 1
+                scored_lines.append((sc, f"{sent} {c.citation}"))
+        scored_lines.sort(key=lambda x: -x[0])
+        key_lines = [ln for sc, ln in scored_lines if sc >= 3][:5]
         body = (f"{head.company}（{head.period} {head.kind}）要点：\n"
                 + "\n".join(f"· {line}" for line in key_lines))
         return {**state, "answer": body, "citations": [target], "verdict": "pass",

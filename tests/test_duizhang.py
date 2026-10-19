@@ -283,6 +283,59 @@ def test_trend_skeleton_mode_independent():
     assert "不构成投资建议" in st["answer"]
 
 
+def test_two_digit_year_parsing():
+    """口语「15年中报」指 2015——二位年份必须解析，库里没有 2015
+    应触发期间守卫拒答，而非静默答成 2025（用户实测）。"""
+    from duizhang.graph import query_years
+    assert query_years("中际旭创15年中报") == {"2015"}
+    assert query_years("2026 年报和 25 年一季报") == {"2026", "2025"}
+    assert query_years("营收 100 元") == set()          # 金额不误判为年份
+
+
+def test_summarize_anchors_mda_section():
+    """「管理层是怎么说的」应锚定 MD&A（经营情况讨论与分析）章节，
+    排除表头残渣与会计政策行——种子检索此前命中封面/回购明细表
+    （用户实测），章节锚定是唯一可靠路径。"""
+
+    class MdaCorpus:
+        def __init__(self):
+            from duizhang.schemas import Doc
+            self.docs = {"中际旭创_2025H1": Doc(
+                "中际旭创_2025H1", "中际旭创", "2025H1", "半年报", "x", 188)}
+
+        def search(self, q, k=6, doc_filter="", doc_scope=None):
+            from duizhang.schemas import Chunk, Retrieved
+            if "经营" in q:      # MD&A 探针 → 章节首块
+                return [Retrieved(chunk=Chunk("mda", "中际旭创_2025H1", 10, 0,
+                    "第三节 管理层讨论与分析"), score=0.3, rank=1)]
+            return [Retrieved(chunk=Chunk("cover", "中际旭创_2025H1", 1, 0,
+                "中际旭创 2025 中报 管理层关于股份回购的实施公告"),
+                score=0.2, rank=1)]
+
+        def chunks_of(self, doc_id, limit=12):
+            return []
+
+        def chunks_page(self, doc_id, page):
+            from duizhang.schemas import Chunk
+            return [Chunk("mda#1", doc_id, page, 1,
+                          "报告期内，公司实现营业收入 147.9 亿元，AI 算力需求"
+                          "持续高景气，管理层认为高端光模块产能稳步释放。"),
+                    Chunk("mda#2", doc_id, page, 2,
+                          "归属于上市公司股东的扣除 非经常性损益 的净利润 （元）"),
+                    Chunk("mda#3", doc_id, page, 3,
+                          "子公司向本公司出售资产所发生的未实现内部交易损益抵销。")]
+
+    from duizhang.graph import make_nodes
+    summarize = make_nodes(MdaCorpus())[7]
+    st = summarize({**new_state("中际旭创 2025 中报管理层是怎么说的", "heuristic"),
+                    "understanding": {"intent": "summary",
+                                      "companies": ["中际旭创"],
+                                      "period": "H1", "reason": "r"}})
+    assert "营业收入" in st["answer"] and "管理层" in st["answer"]  # 叙事行
+    assert "未实现内部交易损益" not in st["answer"]                 # 会计政策排除
+    assert "非经常性损益 的净利润 （元）" not in st["answer"]       # 表头排除
+
+
 def test_trend_intent_and_period_order():
     """trend 意图：趋势词触发、优先级低于 compare；报告期按时间序
     （period 后缀映射月份——字典序会把 H1 排在 Q1 前，时间上是错的）；
