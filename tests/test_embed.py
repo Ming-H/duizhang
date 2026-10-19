@@ -5,11 +5,29 @@ import pytest
 pytest.importorskip("fastembed", reason="可选依赖未装（requirements-vec.txt）")
 
 
+class _FakeEmbed:
+    """确定性 char-bag 假嵌入器（512 维）：单测封网——真模型首载要从
+    HuggingFace 下载，无缓存/断网环境会重试到超时挂起（实测 100s×3）；
+    bge 的语义排序已由 D19 消融实测覆盖（DESIGN-v0.6 §8.3），这里
+    只验管线协议：blob 格式 / cosine 排序 / doc_scope 限定 / 前置
+    条件退化。"""
+
+    def embed(self, texts):
+        import numpy as np
+        for t in texts:
+            v = np.zeros(512, dtype=np.float32)
+            for ch in t:
+                if not ch.isspace():
+                    v[ord(ch) % 512] += 1.0
+            yield v
+
+
 def test_embed_blobs_and_query_ranking(tmp_path, monkeypatch):
     monkeypatch.setenv("DZ_VEC", "on")      # 查询路 opt-in（默认关）
     from duizhang import embed
     from duizhang.schemas import Chunk, Doc
     from duizhang.store import Store
+    monkeypatch.setattr(embed, "_get", _FakeEmbed)   # 封网：不下载真模型
     assert embed.enabled()
     # 嵌入产出 float32 blob（512 维 × 4 字节）
     blobs = embed.embed_blobs(["营业收入 38,239,935,640.67 元",
