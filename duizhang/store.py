@@ -24,6 +24,11 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);
 CREATE TABLE IF NOT EXISTS manifest (
   path TEXT PRIMARY KEY, doc_id TEXT, fingerprint TEXT, ingested_at TEXT);
+CREATE TABLE IF NOT EXISTS vecs (
+  chunk_id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, vec BLOB NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_vecs_doc ON vecs(doc_id);
+CREATE TABLE IF NOT EXISTS vecmeta (
+  model TEXT PRIMARY KEY);
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_w USING fts5(content_w, tokenize='unicode61');
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_c USING fts5(content_c, tokenize='trigram');
 """
@@ -102,6 +107,38 @@ class Store:
             con.execute("DELETE FROM chunks WHERE doc_id=?", (doc_id,))
             con.execute("DELETE FROM docs WHERE doc_id=?", (doc_id,))
             con.execute("DELETE FROM manifest WHERE doc_id=?", (doc_id,))
+            con.execute("DELETE FROM vecs WHERE doc_id=?", (doc_id,))
+
+    # ── 向量层（P1.2 可选路：bge-small-zh @ fastembed，DZ_VEC=off 关闭）──
+
+    def vec_model(self) -> str:
+        """当前向量库绑定的嵌入模型名（空 = 未嵌入）。"""
+        row = self.con.execute("SELECT model FROM vecmeta LIMIT 1").fetchone()
+        return row[0] if row else ""
+
+    def set_vec_model(self, model: str) -> None:
+        """绑定嵌入模型；换模型 → 旧向量全量作废（维度/语义空间不同，
+        混用即错配）。"""
+        with self.con:
+            if self.vec_model() != model:
+                self.con.execute("DELETE FROM vecs")
+            self.con.execute("DELETE FROM vecmeta")
+            self.con.execute("INSERT INTO vecmeta VALUES (?)", (model,))
+
+    def add_vecs(self, rows: list[tuple[str, str, bytes]]) -> None:
+        """批量写入向量（chunk_id, doc_id, float32 blob）。"""
+        with self.con:
+            self.con.executemany(
+                "INSERT OR REPLACE INTO vecs VALUES (?,?,?)", rows)
+
+    def vec_count(self) -> int:
+        return self.con.execute("SELECT COUNT(*) FROM vecs").fetchone()[0]
+
+    def vec_missing(self) -> list[tuple[str, str, str]]:
+        """还没有向量的 (chunk_id, doc_id, text) 清单——增量嵌入的工作集。"""
+        return self.con.execute(
+            "SELECT chunk_id, doc_id, text FROM chunks WHERE chunk_id NOT IN "
+            "(SELECT chunk_id FROM vecs)").fetchall()
 
     def set_manifest(self, path: str, doc_id: str, fingerprint: str,
                      ingested_at: str = "") -> None:

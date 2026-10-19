@@ -125,6 +125,33 @@ def cmd_index(args):
     print(f"FTS 重建完成：{n} chunks")
 
 
+def cmd_embed(args):
+    """为存量 chunks 嵌入向量（可选第三路 RRF；fastembed + bge-small-zh）。
+    增量：只嵌没有向量的块；换模型自动作废旧向量。"""
+    from duizhang import embed
+    if not embed.installed():
+        sys.exit("向量路不可用：pip install -r requirements-vec.txt")
+    from duizhang.store import Store
+    store = Store(DB)
+    if store.vec_model() != embed.MODEL:
+        store.set_vec_model(embed.MODEL)   # 换模型 → 旧向量作废
+    todo = store.vec_missing()
+    n_docs, _ = store.counts()
+    print(f"待嵌入 {len(todo)} chunks")
+    done = 0
+    B = 64
+    for i in range(0, len(todo), B):
+        batch = todo[i:i + B]
+        blobs = embed.embed_blobs([t for _, _, t in batch])
+        store.add_vecs([(cid, doc, b) for (cid, doc, _), b in zip(batch, blobs)])
+        done += len(batch)
+        if done % 1024 < B or done == len(todo):
+            print(f"  … {done}/{len(todo)}")
+    print(f"向量嵌入完成：{store.vec_count()} chunks（模型 {embed.MODEL}，"
+          f"{n_docs} docs）")
+    store.close()
+
+
 def cmd_ask(args):
     from duizhang.graph import ask
     corp = _corpus_from_db()
@@ -164,6 +191,10 @@ def main():
 
     p = sub.add_parser("index", help="为存量 chunks（重）建 FTS 索引")
     p.set_defaults(fn=cmd_index)
+
+    p = sub.add_parser("embed", help="为存量 chunks 嵌入向量（可选第三路 RRF，"
+                                     "需 pip install -r requirements-vec.txt）")
+    p.set_defaults(fn=cmd_embed)
 
     p = sub.add_parser("ask", help="提问")
     p.add_argument("query")

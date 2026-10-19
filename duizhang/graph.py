@@ -268,7 +268,8 @@ def trend_skeleton(hits, corpus=None) -> str:
             best_s, best_sc = "", -99
             for c in pool:
                 c_text = c.text
-                for frag, full in (("润（元）", "净利润"), ("入（元）", "营业收入")):
+                for frag, full in (("润（元）", "净利润"), ("入（元）", "营业收入"),
+                                   ("者权益（元）", "归属于上市公司股东的净资产")):
                     if c_text.lstrip().startswith(frag):
                         c_text = full + " " + c_text
                         break
@@ -945,15 +946,19 @@ def make_nodes(corpus: Corpus):
         pool = list(state.get("evidence") or []) + list(state.get("hits", []))
         verdict, cov = ans.verify(a, pool)
         if verdict == "pass":
-            return {**state, "verdict": "pass", "trace": [f"verify:pass({cov})"]}
+            return {**state, "verdict": "pass", "coverage": cov,
+                    "trace": [f"verify:pass({cov})"]}
         if verdict == "refused":
-            return refuse({**state, "trace": ["verify:empty→refuse"]})
+            return refuse({**state, "coverage": cov,
+                           "trace": ["verify:empty→refuse"]})
         # degraded：LLM 答案对不上账 → 降级为抽取式（永远有真凭实据）
         body, cited = ans.extractive_answer(state, state["hits"])
         if body:
             return {**state, "answer": body, "citations": cited, "verdict": "degraded",
+                    "coverage": cov,
                     "trace": [f"verify:degraded({cov})→extractive"]}
-        return refuse({**state, "trace": [f"verify:degraded({cov})→refuse"]})
+        return refuse({**state, "coverage": cov,
+                       "trace": [f"verify:degraded({cov})→refuse"]})
 
     return (understand, route, retrieve, grade_docs, rewrite_query, generate,
             decompose, summarize_doc, refuse, verify_citations, agent_research,

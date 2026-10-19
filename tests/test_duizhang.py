@@ -69,6 +69,14 @@ def test_metric_synonym_guimu():
     assert "归属于上市公司股东的净利润" in expand_query("归母净利润怎么样")
 
 
+def test_metric_synonym_jingzichan():
+    """净资产 → 归属于上市公司股东的净资产 / 归属于母公司所有者权益：
+    归母净资产在主要会计数据表叫前者（行标签常被断词成「者权益（元）」），
+    资产负债表叫后者——双映射让两条路都命中（净资产题实测 kw=N）。"""
+    eq = expand_query("归属于上市公司股东的净资产多少")
+    assert "归属于母公司所有者权益" in eq
+
+
 def test_parse_filename_rejects_non_company_fallback():
     """P0.5：兜底通道抽出的「公司名」是日期/纯数字（20261009_永和…分析.md
     → company=20261009 → doc_id 20261009_MD 垃圾入库）时拒收——
@@ -209,6 +217,21 @@ def test_verify_pool_includes_beyond_rank4_hits():
               citations=[fact.chunk.citation])
     out = verify(st)
     assert out["verdict"] == "pass", out.get("trace")
+    assert out["coverage"] >= 0.45    # 覆盖率进 state（此前只在 trace 字符串里）
+
+def test_extractive_splits_fix_jingzichan_row():
+    """断词工件（D16 族）：主要会计数据表的「归属于上市公司股东的
+    净资产（元）」行被切成「者权益（元） 20,714,619,471.62 …」——
+    query 的「净资产/股东」与残片零重叠，真值行落选（净资产题实测
+    kw=N）。注入映射后应抽中。"""
+    from duizhang.answer import extractive_answer
+    from duizhang.schemas import new_state
+    broken = _hit("z", "中际旭创_2025Q1", 3, 11,
+                  "者权益（元） 20,714,619,471.62 19,133,887,012.66 8.26%", 1)
+    st = new_state("中际旭创 2025 一季度归属于上市公司股东的净资产多少",
+                   "heuristic")
+    body, _c = extractive_answer(st, [broken])
+    assert "20,714,619,471" in body
 
 
 def test_extractive_caliber_guard_koufei_vs_revenue():
@@ -1101,3 +1124,26 @@ def test_eval_dataset_passes_thresholds(corpus):
     assert s["answer_hit"] >= 0.9
     assert s["refusal"] == 1.0
     assert s["retrieval_top3"] >= 0.75
+
+
+def test_fts_search_fuses_extra_vector_ranking(tmp_path):
+    """P1.2 三路 RRF：extra_ranking（向量路）作为第三排名列表进 RRF。
+    动机场景：口语「归母净资产」与报表「归属于母公司所有者权益」
+    零词面重叠，双轨 FTS 全 miss——向量语义命中由第三路补位。"""
+    from duizhang import fts
+    from duizhang.schemas import Chunk, Doc
+    from duizhang.store import Store
+    s = Store(tmp_path / "v.db")
+    s.add_doc(Doc("测试司_2025Q1", "测试司", "2025Q1", "一季报", "x", 1),
+              [Chunk("测试司_2025Q1#p1#0", "测试司_2025Q1", 1, 0,
+                     "归属于母公司所有者权益合计 20,714,619,471.62")])
+    con = s.con
+    docs = {"测试司_2025Q1": Doc("测试司_2025Q1", "测试司", "2025Q1",
+                                 "一季报", "x", 1)}
+    # 双轨基线：词面零重叠 → 空
+    assert fts.search(con, docs, "归母净资产") == []
+    # 第三路注入该块 → 三路融合命中
+    out = fts.search(con, docs, "归母净资产",
+                     extra_ranking=["测试司_2025Q1#p1#0"])
+    assert out and out[0].chunk.chunk_id == "测试司_2025Q1#p1#0"
+    s.close()

@@ -82,3 +82,28 @@ def test_analyze_populates_stats(db):
     n = db.con.execute(
         "SELECT COUNT(*) FROM sqlite_stat1 WHERE tbl='chunks'").fetchone()[0]
     assert n >= 1
+
+
+def test_vecs_lifecycle_model_stamp_and_ghost_cleanup(db):
+    """P1.2 向量层（Store 仍是唯一写入口）：vecs 随 add_vecs 写入；
+    drop_doc 级联清向量（幽灵向量防线，同 fts/chunks 对齐纪律）；
+    换嵌入模型 → 旧向量全量作废（模型绑定 vecmodel 表）。"""
+    _add(db)
+    cid = next(iter(db.con.execute(
+        "SELECT chunk_id FROM chunks LIMIT 1").fetchall()))[0]
+    assert db.vec_model() == ""
+    db.set_vec_model("bge-test")
+    db.add_vecs([(cid, "欧科亿_2026H1E", b"\x01" * 16)])
+    assert db.vec_count() == 1
+    # 待嵌入清单：未入库向量的 chunks（chunk_id, doc_id, text）
+    missing = {row[0] for row in db.vec_missing()}
+    assert cid not in missing and len(missing) >= 1
+    # 换模型 → 向量作废
+    db.set_vec_model("another-model")
+    assert db.vec_model() == "another-model"
+    assert db.vec_count() == 0
+    # 幽灵向量：drop_doc 后向量随文档消失
+    db.set_vec_model("bge-test")
+    db.add_vecs([(cid, "欧科亿_2026H1E", b"\x01" * 16)])
+    db.drop_doc("欧科亿_2026H1E")
+    assert db.vec_count() == 0

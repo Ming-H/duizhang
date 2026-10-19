@@ -88,6 +88,7 @@ class GraphState(TypedDict, total=False):
     citations: list[str]
     # verify 节点
     verdict: Literal["pass", "degraded", "refused"]
+    coverage: float                     # 引用覆盖率（faithfulness 报告指标用）
     trace: Annotated[list[str], operator.add]   # 执行轨迹（append 语义）
 
 

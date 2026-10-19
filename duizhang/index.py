@@ -56,8 +56,15 @@ class Corpus:
                doc_scope: set[str] | None = None) -> list[Retrieved]:
         if not self._con or not self.docs:
             return []
+        # 向量第三路（P1.2 可选）：依赖在 + 库已嵌入才生效，否则 None
+        # → fts.search 双轨行为不变
+        from duizhang import embed
+        extra = None
+        if embed.enabled():
+            extra = embed.ranking(self._con, self.docs, query,
+                                  doc_filter, doc_scope)
         return fts.search(self._con, self.docs, query, k=k, doc_filter=doc_filter,
-                          doc_scope=doc_scope)
+                          doc_scope=doc_scope, extra_ranking=extra)
 
     def chunks_of(self, doc_id: str, limit: int = 12) -> list[Chunk]:
         """summarize 用：按文档取前 N 块（替代 v0.3 的全内存扫描）。"""

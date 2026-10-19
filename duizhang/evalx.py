@@ -53,17 +53,80 @@ def judge(case: dict, st: dict) -> dict:
                 expect_refused=bool(case.get("expect_refused")))
 
 
+def chunk_pr(case: dict, st: dict, k: int = 8) -> dict | None:
+    """chunk 级 P/R（操作性定义，P1.3）。
+
+    真值承载块 = doc ∈ expect_docs 且 text 含任一 expect_keywords
+    （关键词是人工核对过的原文数字/词）。relevant 集未做全量标注
+    （同一数字常在叙述/表格多处出现），故：
+    · P@k = top-k 中真值承载块占比——检索噪声的下界度量；
+    · R@k = top-k 内出现 ≥1 真值承载块记 1——命中率下界近似。
+    拒答题/无关键词题返回 None，不计入统计。
+    """
+    if case.get("expect_refused") or not case.get("expect_keywords"):
+        return None
+    hits = st.get("hits", [])[:k]
+    if not hits:
+        return {"p": 0.0, "r": 0.0}
+    expect_docs = case.get("expect_docs") or [case["expect_doc"]]
+
+    def _rel(h):
+        c = h.chunk if hasattr(h, "chunk") else h
+        return (c.doc_id in expect_docs
+                and any(kw in c.text for kw in case["expect_keywords"]))
+
+    n_rel = sum(1 for h in hits if _rel(h))
+    return {"p": round(n_rel / len(hits), 3), "r": 1.0 if n_rel else 0.0}
+
+
+def summarize(rows: list[dict], states: list[dict], mode: str, dataset: str,
+              prs: list[dict] | None = None) -> dict:
+    """汇总三指标 + faithfulness + chunk 级 P/R（纯函数，便于复用）。
+
+    faithfulness 两个口径：非拒答题中 verify pass 占比（闸门放行的
+    生成占比；degraded 已被重写为抽取式，天然可回溯）；平均引用覆盖率
+    （GraphState.coverage，v0.6.3 起写入）。chunk P/R 的 per-case 值由
+    run_eval 用原题关键词算好传入（judge 行不带关键词）。
+    """
+    answered = [(r, s) for r, s in zip(rows, states)
+                if not r["expect_refused"]]
+    n_ans = max(1, len(answered))
+    prs = prs or []
+    n_ref = max(1, sum(1 for r in rows if r["expect_refused"]))
+    covs = [s.get("coverage") for _, s in answered
+            if s.get("coverage") is not None]
+    return dict(
+        mode=mode,
+        dataset=dataset,
+        cases=len(rows),
+        retrieval_top3=round(sum(r["doc_hit"] for r, _ in answered) / n_ans, 3),
+        answer_hit=round(sum(r["kw_hit"] for r, _ in answered) / n_ans, 3),
+        refusal=round(sum(1 for r in rows
+                          if r["expect_refused"] and r["refused"]) / n_ref, 3),
+        faithfulness_pass=round(
+            sum(1 for _, s in answered if s.get("verdict") == "pass") / n_ans, 3),
+        mean_coverage=round(sum(covs) / len(covs), 3) if covs else 0.0,
+        **{"chunk_p@8": round(sum(p["p"] for p in prs) / len(prs), 3) if prs else 0.0,
+           "chunk_r@8": round(sum(p["r"] for p in prs) / len(prs), 3) if prs else 0.0},
+    )
+
+
 def run_eval(corpus, mode: str = "auto", verbose: bool = True,
              dataset: str = "default") -> dict:
     from duizhang.graph import build_graph
     from duizhang.schemas import new_state
 
     app = build_graph(corpus)      # 图只编译一次，逐题 invoke
-    rows = []
-    for c in load_dataset(dataset):
+    rows, states, prs = [], [], []
+    cases = load_dataset(dataset)
+    for c in cases:
         st = app.invoke(new_state(c["q"], mode))
         row = judge(c, st)
         rows.append(row)
+        states.append(st)
+        pr = chunk_pr(c, st)
+        if pr:
+            prs.append(pr)
         if verbose:
             flag = "✓" if row["ok"] else "✗"
             print(f"  {flag} {c['q'][:30]:<32} top1={row['top1']:<16} "
@@ -71,19 +134,13 @@ def run_eval(corpus, mode: str = "auto", verbose: bool = True,
                   f"doc={'Y' if row['doc_hit'] else 'N'} "
                   f"refused={'Y' if row['refused'] else 'N'}")
 
-    summary = dict(
-        mode=mode,
-        dataset=dataset,
-        cases=len(rows),
-        retrieval_top3=round(sum(r["doc_hit"] for r in rows if not r["expect_refused"])
-                             / max(1, sum(1 for r in rows if not r["expect_refused"])), 3),
-        answer_hit=round(sum(r["kw_hit"] for r in rows if not r["expect_refused"])
-                         / max(1, sum(1 for r in rows if not r["expect_refused"])), 3),
-        refusal=round(sum(1 for r in rows if r["expect_refused"] and r["refused"])
-                      / max(1, sum(1 for r in rows if r["expect_refused"])), 3),
-    )
+    summary = summarize(rows, states, mode, dataset, prs)
     if verbose:
         print(f"\n  mode={summary['mode']} dataset={dataset}"
               f"  retrieval@3={summary['retrieval_top3']}"
-              f"  answer_hit={summary['answer_hit']}  refusal={summary['refusal']}")
+              f"  answer_hit={summary['answer_hit']}"
+              f"  refusal={summary['refusal']}"
+              f"  faithfulness(pass/cov)={summary['faithfulness_pass']}"
+              f"/{summary['mean_coverage']}"
+              f"  chunk P/R@8={summary['chunk_p@8']}/{summary['chunk_r@8']}")
     return summary

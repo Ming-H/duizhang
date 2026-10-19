@@ -54,21 +54,35 @@ def char_expr(query: str) -> str:
     return " OR ".join(_quote(s) for s in dict.fromkeys(segs))
 
 
+def allow_ids(docs: dict, doc_filter: str,
+              doc_scope: set[str] | None) -> list[str] | None:
+    """doc_filter（公司名）/doc_scope → 允许的 doc_id 列表。
+
+    None = 不过滤；[] = 过滤后为空（调用方据此直接返回空结果）。
+    词轨/字轨/向量路共用同一套限定语义（embed.ranking 复用）。
+    """
+    if not doc_filter and doc_scope is None:
+        return None
+    return [d for d in docs
+            if (not doc_filter or doc_filter in d or doc_filter in docs[d].company)
+            and (doc_scope is None or d in doc_scope)]
+
+
 def search(con, docs: dict, query: str, k: int = 8, doc_filter: str = "",
-           doc_scope: set[str] | None = None) -> list[Retrieved]:
-    """双路 FTS5 → RRF 融合 → Retrieved 列表。
+           doc_scope: set[str] | None = None,
+           extra_ranking: list[str] | None = None) -> list[Retrieved]:
+    """双路 FTS5 →（可选第三路向量排名）→ RRF 融合 → Retrieved 列表。
 
     docs: doc_id → Doc。doc_filter（公司名）在 Python 侧展开为 doc_id
     集合后 SQL 下推；doc_scope 直接给定允许的 doc_id 集合（期间硬过滤
     用——文档级限定，见 graph.retrieve）。
+    extra_ranking（P1.2）：chunk_id 有序列表（相似度降序），作为第三
+    排名进 RRF——词法零重叠的语义命中（归母净资产 vs 所有者权益合计）
+    由向量路补位；None 时双轨行为不变。
     """
-    allow_ids: list[str] | None = None
-    if doc_filter or doc_scope is not None:
-        allow_ids = [d for d in docs
-                     if (not doc_filter or doc_filter in d or doc_filter in docs[d].company)
-                     and (doc_scope is None or d in doc_scope)]
-        if not allow_ids:
-            return []
+    allowed = allow_ids(docs, doc_filter, doc_scope)
+    if allowed == []:
+        return []
 
     _apply_pragmas(con)
 
@@ -81,9 +95,9 @@ def search(con, docs: dict, query: str, k: int = 8, doc_filter: str = "",
                f"JOIN chunks ch ON ch.rowid = {table}.rowid "
                f"WHERE {table} MATCH ? ")
         params: list = [expr]
-        if allow_ids is not None:
-            sql += f"AND ch.doc_id IN ({','.join('?' * len(allow_ids))}) "
-            params += allow_ids
+        if allowed is not None:
+            sql += f"AND ch.doc_id IN ({','.join('?' * len(allowed))}) "
+            params += allowed
         sql += f"ORDER BY bm25({table}) LIMIT ?"
         params.append(limit)
         return con.execute(sql, params).fetchall()
@@ -92,20 +106,29 @@ def search(con, docs: dict, query: str, k: int = 8, doc_filter: str = "",
     rows_w = one_track("fts_w", word_expr(query), pool)
     rows_c = one_track("fts_c", char_expr(query), pool)
 
-    # RRF k=60（与 v0.3 语义一致）
+    # RRF k=60（与 v0.3 语义一致；P1.2 起第三路向量排名同律融合）
+    rankings: list = [rows_w, rows_c]
+    if extra_ranking:
+        rankings.append(extra_ranking)
     rrf: dict[str, float] = {}
     rowid_of: dict[str, int] = {}
-    for ranking in (rows_w, rows_c):
+    for ranking in rankings:
         for rank, row in enumerate(ranking, start=1):
-            cid = row[0]
+            cid = row[0] if not isinstance(row, str) else row
             rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (60 + rank)
-            if cid not in rowid_of:
+            if cid not in rowid_of and not isinstance(row, str):
                 rowid_of[cid] = row[1]
 
     fused = sorted(rrf.items(), key=lambda x: -x[1])[:k]
     if not fused:
         return []
-    # 融合后一次性取正文
+    # 融合后一次性取正文（向量路只有 chunk_id，正文按 id 取）
+    by_id = [cid for cid, _ in fused if cid not in rowid_of]
+    if by_id:
+        for r in con.execute(
+                f"SELECT chunk_id, rowid FROM chunks WHERE chunk_id IN "
+                f"({','.join('?' * len(by_id))})", by_id):
+            rowid_of[r[0]] = r[1]
     rowids = [rowid_of[cid] for cid, _ in fused]
     rows = con.execute(
         f"SELECT {_CHUNK_COLS.replace('ch.', 'chunks.')} FROM chunks WHERE rowid IN "
