@@ -1,29 +1,40 @@
 # 对账 duizhang 🧾
 
 [![CI](https://github.com/Ming-H/duizhang/actions/workflows/ci.yml/badge.svg)](https://github.com/Ming-H/duizhang/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > **RAG 的每个答案都要能对账。**
 
-**封闭世界约束下的事实 Agent**（v0.7：四支柱齐备）：LLM（本地 Ollama，
-零 key 零费用零外呼；模型档位自选 `DZ_LLM_MODEL`——小档适配多数
-机器，大档叙述更佳）决定「怎么查、怎么讲」——查询理解、多跳规划、
-自主迭代检索、多轮记忆继承、grounded 生成；确定性代码决定「答案
-能不能出门」——引用覆盖率闸门不过就降级或拒答。逐句挂引用、引用
-必可回溯到财报原文的页与段；对不上的答案宁可拒答，也不编。
+**封闭世界约束下的事实 Agent**（v0.7：四支柱齐备）：LLM 决定「怎么查、怎么讲」——查询理解、多跳规划、自主迭代检索、多轮记忆继承、grounded 生成；确定性代码决定「答案能不能出门」——引用覆盖率闸门不过就降级或拒答。逐句挂引用、引用必可回溯到财报原文的页与段；对不上的答案宁可拒答，也不编。
 
-**封闭世界（closed-world）契约**：财报是专属内部资料——答案里的
-每个事实只能来自内部 RAG 检索的证据，LLM 参数知识只做语言组织、
-不产出事实；工具白名单只含内部动作（search / metrics_table /
-derive），永无浏览器、外部 API、模型生成代码；写入长期记忆的只有
-verify:pass 的结构化事实。封闭世界让「对账」成为可判定的问题——
-开放世界里 verify 永远证伪不了「模型碰巧知道」。
+新读者从这里开始：**[docs/INTRODUCTION.md](docs/INTRODUCTION.md) — 项目导览**。
 
-```
-2,345,678,901.23 元  ──句读──▶  ≈23.46 亿      （数字归一化，句读 judou 的基因）
-   任意一个答案    ──对账──▶  [公司_报告期 第N页] （引用覆盖率不达标自动降级）
-  LLM 主导检索策略     ──闸门──▶  verify_citations（确定性，模型无权跳过）
-  事实唯一来源 = 内部 RAG 证据；参数知识/外部工具/生成代码 一律不出事实
-```
+## 目录
+
+- [核心特性](#核心特性)
+- [30 秒跑起来](#30-秒跑起来)
+- [LLM 配置：三档通道](#llm-配置三档通道)
+- [CLI 一览](#cli-一览)
+- [架构](#架构)
+- [评测](#评测)
+- [项目结构](#项目结构)
+- [文档索引](#文档索引)
+- [FAQ](#faq)
+- [Roadmap](#roadmap)
+
+## 核心特性
+
+| 特性 | 一句话 | 实测锚点 |
+|---|---|---|
+| **对账闸门** | 答案数字句必须能在证据池里回溯到原文页段，覆盖率 < 阈值自动降级抽取式或拒答 | verify 从不豁免任何路径（Agent/台账/差分） |
+| **封闭世界契约** | 事实只来自内部 RAG 证据；工具白名单只有内部动作（search / metrics_table / derive），永无浏览器/外部 API/模型生成代码；参数知识只组织语言不产出事实 | 封闭世界让「对账」可判定——开放世界 verify 永远证伪不了「模型碰巧知道」 |
+| **Agent 四支柱** | Planning（子目标清单+只删不造校验）/ Memory（L0 会话继承+L1 事实台账+L2 语义资产）/ Tool Use（三工具注册表）/ ReAct（步级四元组观测） | DESIGN-v0.7 §4 |
+| **口径守卫体系** | 六对指标配对降权 + 口径数值闸（D22）：问扣非不得拿归母、问总收入不得拿营业收入、问总资产不得拿货币资金冒充 | gate≠correctness 边界的第一处收口（DESIGN-v0.6 §10） |
+| **多公司泛化** | 简称归一（茅台→贵州茅台）、行级抽取、断词修复——任意丢一家 A 股公司财报进语料即插即用 | 贵州茅台 10 份零调参 9/9 双脑全绿 |
+| **确定性优先** | trend 走确定性期间遍历；单季数 Q2=H1−Q1 / Q4=FY−Q3 是原币精度差分算子+出口重算，**禁止模型心算** | 算术也是事实（封闭世界） |
+| **双大脑** | LLM 模式与零 key 规则模式（heuristic）同一张图；LLM 故障逐点退规则并留 trace 标记 | heuristic 是可复现的回归基线 |
+| **评测内建** | 7 数据集 / 58 题；retrieval@3 · answer hit · refusal · faithfulness · chunk P/R@8 · steps waste_rate | `python -m duizhang.cli eval` 一条命令复现 |
+| **观测性三档** | 产品态（pass 静默）/ `-v` 诊断态（trace 每节点带耗时，stderr）/ `--json` 机器态（整态+行级 rows） | 修前/修后对比可脚本化 |
 
 ## 30 秒跑起来
 
@@ -34,216 +45,218 @@ python -m duizhang.cli ask "欧科亿 2026 年半年度预计净利润多少"
 python -m duizhang.cli eval                # 内置评估集，一条命令复现
 ```
 
-**LLM 大脑默认就在本地**：装好 [Ollama](https://ollama.com)（≥0.40）并
-`ollama pull` 一个模型，零 key 零配置直接可用（本地端点免鉴权）。档位
-自选——下面以 `qwen3.5:0.8b` 为例（多数机器跑得动；机器资源充足时
-`DZ_LLM_MODEL` 换更大档，叙述质量更好，闸门兜底不变）：
+规则模式（heuristic）零依赖零 key 即可用——上面三条命令不需要任何 LLM 配置。要上 LLM 大脑见下节。
+
+## LLM 配置：三档通道
+
+所有配置写 `.env`（已 gitignore，绝不进 git）。通道由 `DZ_LLM_BASE_URL` 自动识别，**换脑不改代码**：
+
+| 档位 | 端点 | 需要 | 说明 |
+|---|---|---|---|
+| 0（默认） | `http://localhost:11434/v1` | 装 [Ollama](https://ollama.com) ≥0.40 + pull 模型 | 零 key 零费用零外呼；原生 `/api/chat` 支持 think 参数（默认关，开约 ×5 延迟） |
+| 1 | 任意 OpenAI 兼容端点 | `DZ_LLM_API_KEY` + `BASE_URL` | deepseek / 智谱 `/api/paas/v4` / GLM Coding Plan `/api/coding/paas/v4` / gpt 等 |
+| 2 | Anthropic 兼容端点 | `DZ_LLM_API_KEY` + `BASE_URL` | 如 `https://open.bigmodel.cn/api/anthropic`；thinking 计入 max_tokens → 预算自动 ×8 |
 
 ```bash
-ollama pull qwen3.5:0.8b
-python -m duizhang.cli ask "对比欧科亿和海伦哲 2026 一季度谁赚得多"   # 多跳对比
-python -m duizhang.cli eval --mode llm --dataset agent
+cp .env.example .env    # 按注释填三行即可切档
 ```
 
-没装 Ollama 也能跑（`--mode auto`：本地不可用自动走规则模式）。要接远端，
-把配置写进 `.env`（已 gitignore，绝不进 git）——任意 OpenAI 兼容端点
-（deepseek/智谱 v4/gpt）或 Anthropic 兼容端点均可：
-
 ```bash
-cat >> .env <<'EOF'
+# 档位 1 示例：智谱 Coding Plan（本仓实测通道）
 DZ_LLM_API_KEY=你的key
-DZ_LLM_BASE_URL=https://api.deepseek.com/v1
-DZ_LLM_MODEL=deepseek-chat
-EOF
+DZ_LLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
+DZ_LLM_MODEL=glm-5.3
 ```
 
-全量语料：`python -m duizhang.cli ingest data/corpus`（manifest 指纹增量，
-新增/修改/删除自适应，幂等运行秒级返回；**多根摄取互不干扰**——
-ingest `samples/` 后再 ingest `data/corpus`，两个根的文档共存，
-删除/孤儿清理只对本次扫描的根负责）。
+**完整环境变量参考**：
 
-## 这张图在做什么（v0.7：封闭世界事实 Agent）
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `DZ_LLM_API_KEY` | 空 | 只存 `.env`；本地端点免 key |
+| `DZ_LLM_BASE_URL` | localhost:11434 | 通道识别（本地 / OpenAI 兼容 / Anthropic 兼容） |
+| `DZ_LLM_MODEL` | `qwen3.5:0.8b` | 编排假设不绑档位——换大档叙述上移，闸门兜底不变 |
+| `DZ_LLM_MAX_TOKENS` | 按档位 | 生成 token 预算 |
+| `DZ_LLM_THINKING` | `disabled` | 仅影响生成；结构化调用永远关 |
+| `DZ_DB` | `./duizhang.db` | SQLite 库路径 |
+| `DZ_TREND_ANALYSIS` | 未设=叙述开 | 三态：默认数字闸+方向闸双闸兜底；`enabled` 加深度投资分析；`off` 骨架直出（逃生门） |
+| `DZ_SELF_CHECK` | 开 | LLM 裁判非对称信任：只能否决不能解锁；`off` 省一次调用 |
+| `DZ_MEMORY` | 开 | L1 事实台账总闸；`off` 退无记忆行为 |
+| `DZ_EVAL_MEMORY` | 隔离 | eval 内默认隔离台账，`on` 显式放开（防止把检索能力测成记忆命中） |
+| `DZ_VEC` | 关 | 向量第三路 RRF（需 `requirements-vec.txt` + `cli embed`）；消融实测数字/口径题净负，opt-in 实验 |
+
+## CLI 一览
+
+```bash
+python -m duizhang.cli ingest samples/            # 增量摄取（manifest 指纹 diff，幂等）
+python -m duizhang.cli ingest data/corpus --watch # 轮询模式：每 60s 增量同步
+python -m duizhang.cli ask "对比欧科亿和海伦哲 2026 一季度谁赚得多"   # 多跳对比
+python -m duizhang.cli ask "茅台 2026 半年度扣非净利润多少" -v        # 诊断态：trace 每节点耗时
+python -m duizhang.cli ask "…" --json            # 机器态：整态 JSON
+python -m duizhang.cli chat                      # 多轮对话（L0 记忆：追问继承公司/期间/指标/年份）
+python -m duizhang.cli docs                      # 已入库文档清单
+python -m duizhang.cli index                     # 为存量 chunks 重建 FTS
+python -m duizhang.cli embed                     # 可选向量第三路（需 requirements-vec.txt）
+python -m duizhang.cli eval [--mode m] [--dataset d] [--json]
+```
+
+`-v` 诊断态示例（stderr，产品态 pass 时静默）：
+
+```
+trace: start(358ms) → understand:rule(0ms) → route:metric(80ms) → retrieve:14 hits(1ms)
+       → grade:2.0 ok(5ms) → generate:extractive(4ms) → verify:pass(0.967)  总耗时 0.45s
+```
+
+## 架构
 
 ```
 START → understand ──→ memory_probe ─→ route ──多跳信号──→ 【plan 规划】─→ 【agent_research ReAct 工具循环】─→ generate ──→ verify_citations
-      （LLM 结构化理解：   （L1 台账探针：    │            ≥3公司/跨年/≥2指标族      子目标白名单校验(只删不造)      （确定性闸门，不豁免）
-       intent/公司/期间，   命中仍要过 verify） │                                    search/metrics_table/derive       ↓ fail
+      （LLM 结构化理解：   （L1 台账探针：    │            ≥3公司/跨年/≥2指标族      子目标白名单校验(只删不造)      search/metrics_table/derive       ↓ fail
+       intent/公司/期间，   命中仍要过 verify） │                                    search/metrics_table/derive       （确定性闸门，不豁免）
        规则兜底）                            ├─metric/compare(heuristic)→ retrieve/decompose → grade ⇄ rewrite(≤1) ↗  抽取式降级/拒答
                                             ├─trend─→ trend_research（确定性期间遍历 + Q2=H1−Q1 / Q4=FY−Q3 差分派生）
                                             └─other─→ refuse
 ```
 
-**Agent 四支柱（v0.7 补齐，DESIGN-v0.7 §1 盘点 → §4 落地）**：
+**Agent 四支柱与边界**：
 
 | 支柱 | 落地 | 边界（不破坏对账底线） |
 |------|------|------|
-| **Planning 规划** | `plan` 节点（llm 模式）：≥3 公司 / 跨年 / ≥2 指标族的多跳问题先出结构化子目标清单，逐个执行；子目标检查点（数字在场 ∧ 指标词命中）逐个验证 | 校验器**只删不造**：白名单外动作丢弃、规约去重、上限封顶；缺口=部分答案不硬凑 |
-| **Memory 记忆** | 三层：L0 会话（近 3 轮全量+更早压缩为结构化摘要，公司/期间/年份/指标词继承，**永不继承自由文本**）/ L1 事实台账（verified_facts 表，键=公司+期间+指标+口径，合并算子 noop/insert/conflict/restated/reingest）/ L2 固定语义资产（alias 词典） | 写闸=verify:pass ∧ 口径闸未触发；**读不豁免**——台账命中拼出的答案照样过 verify；语料指纹变更即失效 |
-| **Tool Use 工具** | 注册表三工具：`search`（检索）/ `metrics_table`（取某期主要会计数据行）/ `derive`（单季差分 Q2=H1−Q1、Q4=FY−Q3，原币精度） | 白名单只含内部动作；**禁止模型心算**——差分是确定性算子，出口重算操作数必须真在场 |
-| **ReAct 回路** | 步级四元组进观测：`thought/action/obs/gate`（含耗时），`-v` 逐行、`--json` 结构化可重放 | 步数≤6 + 幂等缓存 + 整批重复即收手；理解先验覆盖工具参数防幻觉参数 |
+| **Planning** | `plan` 节点：≥3 公司/跨年/≥2 指标族的多跳问题先出结构化子目标清单，逐个执行；检查点（数字在场 ∧ 指标词命中）逐个验证 | 校验器**只删不造**：白名单外动作丢弃、去重、封顶；缺口=部分答案不硬凑 |
+| **Memory** | L0 会话（近 3 轮全量+更早压缩为结构化摘要，**永不继承自由文本**）/ L1 事实台账（键=公司+期间+指标+口径，五算子合并）/ L2 语义资产（alias 词典） | 写闸=verify:pass ∧ 口径闸未触发；**读不豁免**——台账命中拼的答案照样过 verify；语料指纹变更即失效 |
+| **Tool Use** | 注册表三工具：`search` / `metrics_table` / `derive`（单季差分，原币精度） | 白名单只含内部动作；**禁止模型心算**——出口重算，操作数必须真在场 |
+| **ReAct** | 步级四元组 `thought/action/obs/gate` 进观测，`-v` 逐行、`--json` 可重放 | 步数≤6 + 幂等缓存 + 整批重复即收手；理解先验覆盖工具参数防幻觉参数 |
 
-**长程可靠性（为什么拉长链之前先装闸门）**：单步 95% 可靠的任务 20 步只剩
-~36% 成功——该改的不是单步精度，是传播结构：
+**长程可靠性**（为什么拉长任务链之前先装闸门）——单步 95% 可靠的任务 20 步只剩 ~36% 成功，该改的是传播结构：
 
 ```
 P(错误答案) ≤ Σₖ eₖ·gₖ    eₖ=第k步出错率（模型决定）  gₖ=错误穿过该步闸门的存活率（代码决定）
 e=5%、g=2%、20 步 → ≤2%（朴素模型 36% 失败），且失败形态=降级/拒答（安全失败）
 ```
 
-四个杠杆：能确定化的环节不给模型（trend 确定性遍历）；verify-as-you-go
-（子目标检查点把拦截推进到步级）；结构化传递（字段复制不文本重释——
-GraphState/subgoals/台账都是传播率设计）；并行分支不乘法（compare 按公司
-分解、各自过闸）。`eval --json` 的 steps 出口给出 waste_rate（dup+empty
-占比）作 eₖ 的可测代理。相关性警告：闸门与模型犯同一类错时上界失效——
-heuristic/llm 双脑回归就是相关性探测，不是冗余。
+四个杠杆：能确定化的环节不给模型（trend 遍历/差分算子）；verify-as-you-go（子目标检查点把拦截推进到步级）；结构化传递（字段复制不文本重释）；并行分支不乘法（compare 按公司分解、各自过闸）。`eval --json` 的 `steps.waste_rate` 是 eₖ 的可测代理。
 
-值得看代码的决策点：
+**检索**：SQLite FTS5 双轨（jieba 词轨 + trigram 字轨）RRF 融合（k=60），磁盘倒排使容量与内存解耦——60.7 万块实测：稳态 39ms / 内存 0.03GB / 启动 0.05s / 增量摄取 0.8s（`docs/DESIGN-scale.md`）。可选向量第三路（bge-small-zh @ fastembed）默认关：数字/口径题上词法已饱和，向量净负贡献（消融表 DESIGN-v0.6 §8.3）。
+
+**值得看代码的决策点**：
 
 | 决策 | 为什么 |
 |------|--------|
-| **understand 查询理解** | LLM 一次抽取 intent/公司/期间，直接驱动路由与 `doc_scope` 检索限定——v0.4 的关键词子串猜测是三轮 bug 的根源，理解交给模型、规则只做兜底。 |
-| **compare 多跳分解** | 「对比 A 和 B」按公司拆子查询、各自公司+期间 doc_scope 检索、交错合并——两家证据都在场，且**多跳不豁免对账闸门**。 |
-| **真 Agent 环（v0.6→v0.7）** | llm 模式下检索交给模型：三工具白名单 + ReAct 循环，模型自主决定查什么、何时收手；步数硬上限 + 幂等缓存防小模型死循环，理解先验优先于工具参数防幻觉参数——自主检索照样过对账闸门。 |
-| **Corrective-RAG 纠错环** | `grade_docs → rewrite_query → retrieve` 的**有界**重试（≤1，条件边实现）。检索不足先改写重查一次，还不行才拒答——无界重试是状态机的反模式。 |
-| **trend 双闸 + 裁判自测（v0.6.5）** | 趋势叙述层 LLM 默认在环（数字全部来自确定性骨架），三层兜底：数字闸（叙述数字必须 ∈ 骨架）→ 方向闸（方向词必须与同比符号相容）→ 结构化裁判（faithful/on_topic/sensitive，**非对称信任**：只能否决不能解锁；敏感句只剥不重写）。任一违例退骨架直出=保守失败。 |
-| **derive 差分派生（v0.7）** | 「Q2/Q4 净利」原文不披露单季——用累计数差分（Q2=H1−Q1、Q4=FY−Q3，操作数同为年初至期末累计、口径对齐），原币精度算术，出口重算 |a−b−value|≤0.01 且操作数必须在证据池。**禁止模型心算**（封闭世界：算术也是事实）。 |
-| **期间守卫 + 文档级期间过滤** | 问「2030 年净利润」直接拒（年份来自元数据不靠模型）；问「半年度」时限定该公司对应期间的文档集合重查——年报大文档块会淹没目标期间（v0.4 实测教训）。 |
-| **自由规划、强制对账** | LLM 判无据 → 降级抽取式而非拒答；覆盖率闸门只考核数字句（编造风险所在）、token 过元词过滤；闸门是确定性代码，模型无权跳过。 |
+| **understand 查询理解** | LLM 一次抽取 intent/公司/期间驱动路由与 `doc_scope`——v0.4 的关键词子串猜测是三轮 bug 的根源 |
+| **compare 多跳分解** | 按公司拆子查询、各自 doc_scope 检索、交错合并——两家证据都在场，且多跳不豁免闸门 |
+| **Corrective-RAG 纠错环** | `grade → rewrite → retrieve` 的**有界**重试（≤1）——无界重试是状态机的反模式 |
+| **trend 双闸 + 裁判自测** | 数字闸（叙述数字 ∈ 骨架）→ 方向闸（方向词与同比符号相容，拦「+90.05% 说成大幅回落」）→ 结构化裁判（非对称信任）；任一违例退骨架=保守失败 |
+| **derive 差分派生** | 「Q2/Q4 净利」原文不披露——累计数差分（Q2=H1−Q1、Q4=FY−Q3），原币精度，出口重算；**封闭世界里算术也是事实** |
+| **期间守卫** | 问「2030 年净利润」直接拒——年份来自文档元数据不靠模型；期间过滤互斥匹配防 FY 泄漏 |
+| **多公司泛化** | 简称双向子串归一（D20）+ 行级抽取（D21）+ 口径数值闸（D22）——「任意丢一家 A 股公司进来就能用」 |
 
-## 设计原则
+## 评测
 
-- **LLM 是大脑，本地是默认**（v0.5.1）：默认本地 Ollama
-  （零 key 零费用零外呼；默认小档见 `llm.DEFAULT_MODEL`，`DZ_LLM_MODEL`
-  按机器条件自选），`--mode auto` 本地不可用自动退规则——同一张
-  图，两种大脑；远端任意 OpenAI/Anthropic 兼容端点 `.env` 三行可换。
-  模型每代都在变，编排假设要能活过任何一版实现。
-- **自由规划、强制对账**：LLM 决定怎么查；答案出口的覆盖率闸门是
-  确定性代码，模型无权跳过。
-- **元数据白捡**：巨潮财报命名 `公司_报告期类型.pdf` 自带公司与期间，解析文件名而非让模型猜。
-- **表格感知分块**：财报的核心事实住在表格里，纯字符切分等于销毁证据。数字密集短行聚成原子块，永不跨块。
-- **数字归一化**：`41,914.72 万元` 注释成 `≈4.19亿` 附在块尾，让词法检索对「多少亿」类问法直接命中（纯程序，零幻觉）。
-- **检索：SQLite FTS5 双轨 + RRF**（v0.4）：词轨（jieba 预分词 + unicode61）
-  与字轨（trigram）bm25 打分、RRF 融合；磁盘倒排使容量与内存解耦——
-  60.7 万块实测：稳态 39ms / 内存 0.03GB / 启动 0.05s / 增量摄取 0.8s。
-  容量推导与备选取舍见 `docs/DESIGN-scale.md`、讲解见 `docs/EXPLAINER.md`。
-- **评估内建**：改任何代码，`python -m duizhang.cli eval` 验证三指标不退化。
+**指标定义**：
 
-## 评估（全量语料 1,104 docs / 60.7 万块）
+| 指标 | 定义 |
+|---|---|
+| retrieval@3 | 期望文档进入 top-3 检索 |
+| answer hit | 答案命中人工核对的原文关键词（真值集逐题 SQL 对库核对） |
+| refusal | 陷阱题（未来期间/语料外/领域外）是否正确拒答；无陷阱集记 N/A |
+| faithfulness | 非拒答题中 verify pass 占比 / 平均引用覆盖率 |
+| chunk P/R@8 | 真值承载块（doc∈期望 ∧ 含关键词）在 top-8 的占比与命中下界 |
+| steps | ReAct 步级观汇总：calls/new/dup/empty + `waste_rate=(dup+empty)/calls` |
+
+**结果**（双语料同库 24 docs / 14,701 chunks；heuristic 与档位无关可复现）：
 
 | 数据集 | 模式 | retrieval@3 | answer hit | refusal |
 |---|---|---|---|---|
 | default（10 题，CI 回归） | heuristic | 1.00 | 1.00 | 1.00 |
-| default | llm（本地默认档，Agent 环） | 0.875 | 0.875 | 1.00 |
-| agent（3 对比 + 3 单跳/摘要 + 2 陷阱） | heuristic | 1.00 | 1.00 | 1.00 |
-| agent | **llm（本地默认档，Agent 环）** | **1.00** | **1.00** | **1.00** |
-| agent | llm（glm-5.3 远端，对照） | 1.00 | 1.00 | 1.00 |
-| innolight（31 题真值：事实/趋势/陷阱/鲁棒） | heuristic | 1.00 | 1.00 | 1.00 |
-| innolight | **llm（本地默认档，Agent 环）** | 1.00 | 0.963（每股收益，§9 样本 C） | 1.00 |
-| **maotai（9 题真值：简称/口径/断词泛化）** | **heuristic** | **1.00** | **1.00** | **1.00** |
-| **maotai** | **llm（本地默认档，Agent 环）** | **1.00** | **1.00** | **1.00** |
-| **quarters（8 题：单季派生/直披露/期间守卫）** | **heuristic** | **1.00** | **1.00** | 1.00 |
-| **quarters** | **llm（本地 9b，Planner/derive）** | **1.00** | **1.00** | 1.00 |
-| **multihop（8 题：跨年双值/三公司/多指标族）** | **heuristic** | **1.00** | **1.00** | 1.00 |
-| multihop | llm（本地 9b，Planner） | 0.857 | **1.00** | 1.00 |
-| **multiturn（10 轮接力：继承/口径切换/代词指代）** | **heuristic** | **1.00** | **1.00** | — |
-| **multiturn** | **llm（本地 9b，L0 记忆）** | **1.00** | **1.00** | — |
+| agent（8 题：多跳对比+陷阱） | heuristic / llm | 1.00 | 1.00 | 1.00 |
+| innolight（31 题真值） | heuristic | 1.00 | 1.00 | 1.00 |
+| innolight | llm | 1.00 | 0.963（每股收益=已知边界 §9 样本 C） | 1.00 |
+| **maotai（9 题真值：简称/口径/断词泛化）** | heuristic / llm | **1.00** | **1.00** | **1.00** |
+| **quarters（8 题：单季差分/期间守卫）** | heuristic / llm | **1.00** | **1.00** | 1.00 |
+| **multihop（8 题：跨年双值/三公司/多指标族）** | heuristic | 1.00 | 1.00 | 1.00 |
+| **multiturn（10 轮接力：继承/口径切换/代词指代）** | heuristic / llm | **1.00** | **1.00** | N/A |
 
-> llm 行为**默认档**（`DZ_LLM_MODEL` 未设时）的实测值——换更大档
-> 分数会上移（innolight 实测满分），heuristic 行与档位无关、可复现。
+**语料分工**：`samples/`（3 家公司 5 份财报，演示与 CI 回归）；`data/中际旭创/`（10 docs / 7,873 chunks，**26MB 随 git 入库**——31 题真值集的承重墙）；`data/贵州茅台/`（10 docs / 6,518 chunks，10MB 随 git 入库——多公司泛化的磨刀石）；`data/corpus/`（全量 1,104 docs，本机自备不入 git）。多根摄取同库共存，删除/孤儿清理只对本次扫描根负责。
 
-**语料分工**：`samples/`（3 家公司 5 份财报，演示与 CI 回归）；
-`data/中际旭创/`（10 docs / 7,873 chunks，**随 git 入库 26MB**——
-真值评估集的承重墙：每题答案都是人工核对过的原文数字，脱离这份
-语料 innolight 集不可复现；CI 冒烟常驻承重）；
-`data/贵州茅台/`（10 docs / 6,518 chunks，10MB 随 git 入库——
-2024–2026 与中际旭创同期结构，第二家公司语料就位、真值题待补）；
-`data/corpus/`（全量 1,104 docs，本机自备不入 git）。多语料可同库
-共存（多根摄取），上表 innolight 行即 samples+中际旭创 同库跑出。
+**架构比模型更保命**：小模型生成不足时 verify 闸门自动降级抽取式——满分的含金量在「理解+检索+闸门」，不在生成模型。CI 每次推送跑 120 用例 + README 流程冒烟 + 真值三集冒烟（innolight 31 + quarters 8 + multihop 8 = 47 题）。
 
-**架构比模型更保命**：本地小模型（默认档）的生成质量不足时，verify 闸门
-自动降级为抽取式作答——agent 集满分的含金量在「理解+检索+闸门」，
-不在生成模型。glm-5.3（远端对照）走 GLM Coding Plan 的 Anthropic
-兼容端点；heuristic 模式可复现无方差。**多公司泛化（v0.6.4）**：简称
-归一（茅台→贵州茅台）/行级抽取/口径数值闸（D20–D22，DESIGN-v0.6
-§10）——第二家公司（贵州茅台 10 份）即插即测，9/9 双脑全绿，「任意
-丢一家 A 股公司的财报进来就能用」。陷阱题两类：未来期间（2030）与领域外（天气）——都必须拒答。
-评估新增 faithfulness（pass 率/平均覆盖率 1.00/0.94）与 chunk 级 P/R@8
-（0.148/0.926，P 的差距=前排噪声靶子）；v0.7 再加 **steps 步级观测**
-（calls/new/dup/empty + waste_rate=eₖ 代理）与三个新集：**quarters**
-（单季差分派生——Q4=FY−Q3累、Q2=H1−Q1，真值与年报分季度表交叉验证
-到分位）、**multihop**（跨年双值/三公司/多指标族——Planner 的靶子集）、
-**multiturn**（10 轮接力链——L0 继承/口径切换/代词指代，eval 默认隔离
-L1 台账防「把检索能力测成记忆命中」，`DZ_EVAL_MEMORY=on` 可放开）。
-多跳对比题示例：`对比欧科亿和海伦哲 2026 一季度谁赚得多` → 分解检索两家
-Q1 净利润证据 → 对比作答。历史修复记录见 `docs/DESIGN-v0.4.md` §5、
-`docs/DESIGN-v0.5.md`、`docs/DESIGN-v0.6.md` §7（innolight 真值驱动
-四组修复：裸年份→FY/引用格式解耦/口径行抽取/前置封顶）。
-
-单元测试（130 用例：分块/理解/守卫/纠错环/分解/Store 幽灵块/多根摄取/
-对账口径/引用漂移/表块拼接/口径守卫/前置封顶/裸年份/拒收闸/
-思考分层/.env/向量可选路（缺依赖退双轨）/评测指标/简称归一/
-行级抽取/口径数值闸/配对降权/分层证据/v0.7 四支柱（步级观测/
-Planner 校验/记忆合并算子与写闸读闸/derive 差分与年份隔离），
-conftest 封网永不外呼）：
-
-```bash
-pip install -r requirements-dev.txt
-pytest
-```
-
-## 用自己的财报
-
-```bash
-# 任意目录：PDF 按巨潮命名「公司_2025年年度报告.pdf」；md/txt 主干
-# 必须是公司名（公司_分析.md）——解析不出公司名的文件 ⚠ 拒收，不静默入库
-python -m duizhang.cli ingest /path/to/财报目录
-```
-
-## 目录
+## 项目结构
 
 ```
 duizhang/
-├── schemas.py      # GraphState（窄接口状态）+ Doc/Chunk/Citation
+├── schemas.py      # GraphState（窄接口状态）+ Doc/Chunk/Citation/Retrieved
 ├── source.py       # 语料扫描 + manifest 三态 diff（增量账本）
 ├── ingest.py       # 文件名元数据 / 表格感知分块 / 页眉剥离 / 数字归一化 / 查询扩展
-├── store.py        # 四表唯一写入口（事务 + fts rowid 对齐，幽灵块防线）
+├── store.py        # 六表唯一写入口（docs/chunks/fts_w/fts_c/manifest/verified_facts）
 ├── index.py        # 分词原语 + 瘦身 Corpus（docs 全量、chunk 按需）
-├── fts.py          # FTS5 双轨检索（unicode61 词轨 + trigram 字轨）RRF 融合 + doc_scope
-├── graph.py        # LangGraph 状态机（understand/memory_probe/route/plan/agent_research/trend/…/verify）
-├── memory.py       # Memory 三层（L0 会话压缩继承 / L1 台账读写 / L2 语义资产）
-├── answer.py       # 抽取式生成 + 引用覆盖率校验（对账闸门）
-├── llm.py          # LLM 层：智谱 GLM 默认，.env 装载，思考分层，任意兼容端点可换
-├── evalx.py        # 评估 runner（judge 纯函数；default/agent/innolight 三数据集）
-└── cli.py          # ingest / index / ask / eval / docs
-tests/              # 130 用例（conftest 封网：永不外呼 LLM；test_v07.py=v0.7 四支柱）
-evals/              # default 10 + agent 8 + innolight 31 + maotai 9 + quarters 8 + multihop 8 + multiturn 10 轮
+├── fts.py          # FTS5 双轨检索 + RRF 融合 + doc_scope（可选向量第三路）
+├── graph.py        # LangGraph 状态机（understand/memory_probe/plan/agent/trend/generate/verify）
+├── memory.py       # Memory 三层（L0 会话 / L1 事实台账 / L2 语义资产）
+├── answer.py       # 抽取式生成 + 口径配对降权 + 引用覆盖率校验（对账闸门）
+├── llm.py          # LLM 层：三档通道自动识别 / .env 装载 / 思考分层
+├── evalx.py        # 评估 runner（judge 纯函数；7 数据集；steps/faithfulness/chunk P/R）
+└── cli.py          # ingest / ask / chat / docs / index / embed / eval（-v/--json 三档观测）
+tests/              # 120 用例（conftest 封网：永不外呼 LLM）
+evals/              # 7 数据集 58 题（default/agent/innolight/maotai/quarters/multihop/multiturn）
 samples/            # 3 家公司 5 份真实财报（巨潮）
-docs/               # 设计文档 ×7（v0.4–v0.7/incremental/scale）+ EXPLAINER + TEST-CASES + RAG-EVAL-CASES
-.env                # 密钥（gitignored，永不进 git）
+data/               # 中际旭创 26MB + 贵州茅台 10MB（随 git）；corpus 全量本机自备
+docs/               # 设计文档 ×5 + 导览 + 测试手册 + 评估集设计（见下表）
 ```
 
-## 密钥安全
+## 文档索引
 
-- 默认本地 Ollama **无需任何密钥**；接远端时 key 只放 `.env`
-  （已 gitignore），`_load_dotenv` 装载且环境变量优先
-- 密钥不进代码、不进文档、不进示例命令、不进 git 历史
-- 测试套件 conftest 全局封网（与机器上是否装 Ollama 无关），CI 无密钥全绿
+| 文档 | 内容 |
+|---|---|
+| [docs/INTRODUCTION.md](docs/INTRODUCTION.md) | **新读者导览**：定位、问题、架构白话版、阅读路径 |
+| [docs/DESIGN-v0.7-agent.md](docs/DESIGN-v0.7-agent.md) | Agent 化升级：四支柱、封闭世界公理、长程可靠性 §3、Phase 1-4 落地 |
+| [docs/DESIGN-v0.6.md](docs/DESIGN-v0.6.md) | Agent 环与小模型护栏（D9–D22）：页级证据、trend 层、真值驱动修复、口径数值闸、多公司泛化、已知边界账本 §9 |
+| [docs/DESIGN-v0.5.md](docs/DESIGN-v0.5.md) | Agentic 地基（D1–D6）：理解/分解/纠错环、LLM 通道实测（D7） |
+| [docs/DESIGN-v0.4.md](docs/DESIGN-v0.4.md) | 检索/写入架构：FTS5 双轨、Store 唯一写入口、§5 = round-4 评审 |
+| [docs/DESIGN-incremental.md](docs/DESIGN-incremental.md) | 增量摄取：指纹 diff 与多根共存 |
+| [docs/DESIGN-scale.md](docs/DESIGN-scale.md) | 容量推导：60.7 万块实测与扩展路径 |
+| [docs/EXPLAINER.md](docs/EXPLAINER.md) | 全流程讲解：一条 query 的完整旅程 |
+| [docs/TEST-CASES.md](docs/TEST-CASES.md) | 测试手册：四层测试 / 验收用例 / trace 阅读 |
+| [docs/RAG-EVAL-CASES.md](docs/RAG-EVAL-CASES.md) | 评估集设计方法论 |
+| docs/plans/ | 实施计划存档 |
+
+设计文档记录 *why*——动手前先查，改架构后更新。
+
+## FAQ
+
+**没装 Ollama / 不想用本地模型，能用吗？**
+能。三选一：规则模式（零 LLM，`--mode heuristic`）；任意 OpenAI 兼容远端；Anthropic 兼容远端。`.env` 三行切换，见[上表](#llm-配置三档通道)。
+
+**怎么换模型档位？**
+改 `DZ_LLM_MODEL` 一行。编排假设不绑档位——小档靠闸门兜底，大档叙述上移；实测记录见 DESIGN-v0.5 D7 与各评估表。
+
+**怎么用自己的财报？**
+```bash
+python -m duizhang.cli ingest /path/to/财报目录
+```
+PDF 按巨潮命名「公司_2025年年度报告.pdf」；md/txt 主干必须是公司名。解析不出公司名的文件 ⚠ 拒收，不静默入库。
+
+**怎么加评估题？**
+`evals/*.json` 丢一道 `{q, expect_keywords, expect_doc}`（陷阱题加 `expect_refused: true`），`--dataset 文件名` 即跑。真值必须人工对库核对——没题的语料是死重。
+
+**为什么问「2030 年净利润」会被拒？**
+期间守卫：年份来自文档元数据（不靠模型），语料里没有该期间就拒——对账纪律优先于有用性。
+
+**测试会外呼 LLM 吗？**
+不会。conftest 全局剥 key 封网，与机器上装没装 Ollama、配没配远端无关；CI 无密钥全绿。
 
 ## Roadmap
 
-- [x] ~~向量检索可选后端（bge-small-zh @ fastembed），与词法双路 RRF~~
-  （消融结论 DESIGN-v0.6 §8.3：数字/口径题净负贡献，默认关，DZ_VEC=on opt-in）
-- [x] ~~多公司对比（v0.5 compare 分解）~~
-- [x] ~~trend 双闸 + 裁判自测（v0.6.5：LLM 默认在环，保守失败兜底）~~
-- [x] ~~**v0.7 Agent 化升级**（`docs/DESIGN-v0.7-agent.md`，封闭世界契约下
-  的四支柱 + 长程可靠性设计）：ReAct 步级观测（thought/action/obs/gate
-  四元组 + waste_rate 度量）→ Planner-Executor 多跳规划（子目标检查点 +
-  只删不造校验器）→ 三层记忆（L0 会话压缩继承 / L1 verify 门控事实台账
-  / L2 固定语义资产）→ 工具注册表（search / metrics_table /
-  derive 差分算子）~~（quarters/multihop/multiturn 三集验收）
-- [x] ~~跨期对比（「2025 vs 2026」类跨年双值题）~~（multihop 集 + Planner）
+- [x] ~~多公司泛化（v0.6.4：D20 简称/D21 行级/D22 口径闸）~~
+- [x] ~~Agent 四支柱（v0.7：Planner/Memory/Tool/ReAct）~~
+- [ ] 每股收益断词标签修复（§9 样本 C，innolight llm 30/31 的最后一题）
+- [ ] 跨期对比（「2025 vs 2026 毛利率变化」→ 按期间分解）
 - [ ] rerank 层（LLM 或 cross-encoder 可切换）
+- [ ] 向量轨语义问法实验（D19 留的口子：「为什么/怎么样」类是否受益）
 - [ ] Web UI（对账视图：答案句 ↔ 原文高亮）
+
+## 密钥安全
+
+- key 只放 `.env`（已 gitignore），`_load_dotenv` 装载且环境变量优先；不进代码、不进文档、不进示例命令、不进 git 历史
+- 测试套件 conftest 全局封网；CI 无密钥全绿
 
 ## License
 
