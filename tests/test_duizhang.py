@@ -1399,3 +1399,61 @@ def test_fts_search_fuses_extra_vector_ranking(tmp_path):
                      extra_ranking=["测试司_2025Q1#p1#0"])
     assert out and out[0].chunk.chunk_id == "测试司_2025Q1#p1#0"
     s.close()
+
+
+def test_quarter_view_unified_series():
+    """v0.6.6 单季统一视图：Q1 直取、Q2=H1−Q1、Q3=三季报累计−H1（新
+    差分）、Q4=FY−三季报累计——每季一行（营收+归母同列），取最近 n 季。
+    用户实测「近4个季度」此前给的是报告期混合口径（单季/半年累计/前三
+    季累计混排），日历季度序列在数据层不存在。"""
+    from duizhang.graph import _quarter_view
+
+    def _e(doc_id, tag, rows):
+        period = doc_id.rsplit("_", 1)[-1]
+        return {"doc_id": doc_id, "period": period, "tag": tag,
+                "cumulative": tag == "Q3", "rows": rows,
+                "citation": f"[{doc_id} 第1页]", "page": 1}
+
+    def _r(label, yi, yoy, raw):
+        return {"label": label, "yi": yi, "yoy": yoy, "raw": raw}
+
+    entries = [
+        _e("X_2025Q1", "Q1", [_r("营收", "66.7 亿", "37.82%", 6674176487.23),
+                               _r("归母净利", "15.8 亿", "56.83%", 1582876128.67)]),
+        _e("X_2025H1", "H1", [_r("营收", "147.9 亿", "36.95%", 14789074837.80),
+                               _r("归母净利", "40.0 亿", "69.40%", 4.0e9)]),
+        _e("X_2025Q3", "Q3", [_r("营收", "250.0 亿", "44.43%", 25000000000.00),
+                               _r("归母净利", "71.3 亿", "90.05%", 7.13e9)]),
+    ]
+    items, derived = _quarter_view(entries, n=4)
+    text = "\n".join(t for _, t in items)
+    assert "X_2025Q1（单季）：营收 66.7 亿（同比 37.82%）" in text
+    assert "X_2025Q2（单季·派生）：营收 81.1 亿" in text      # H1−Q1
+    assert "X_2025Q3（单季·派生）：营收 102.1 亿" in text     # 三季报累计−H1（新差分）
+    assert len(items) == 3
+    assert any(d["label"] == "X_2025Q3营收" for d in derived)  # 出口重算登记
+    assert any(d["label"] == "X_2025Q2归母净利" for d in derived)
+
+
+def test_quarter_n_parse():
+    """「近N个季度」信号解析：带数字才进单季视图；「最近几个季度/
+    近几年」保持报告期视图（innolight/多轮既有题的关键词锚在 as-reported
+    值上，无数字切换会整体回退）。"""
+    from duizhang.graph import _quarter_n
+    assert _quarter_n("近4个季度的营收趋势") == 4
+    assert _quarter_n("最近3季怎么样") == 3
+    assert _quarter_n("近 2 个季度") == 2
+    assert _quarter_n("近几年营收趋势") is None
+    assert _quarter_n("最近几个季度的净利润趋势") is None
+
+
+def test_direction_gate_second_order_pass():
+    """方向闸二阶收口（v0.6.6）：方向词前紧邻速率名词（增速/增幅/涨幅/
+    增长率）判为二阶——「增速回落」是速率事实且与同比正号相容（146%→37%
+    指标仍涨），此前被当一阶词误杀，glm-5.3 的正确方向叙述整段被毙退
+    骨架（用户实测 trace: direction-gate(回落…)）。裸「回落」仍拦。"""
+    from duizhang.graph import direction_gate
+    sk = "· X_2025Q1（单季）：营收 66.7 亿（同比 37.82%）；归母净利 15.8 亿（同比 56.83%）"
+    assert direction_gate("同比从 146% 降至 37%，营收增速回落", sk) is None
+    assert direction_gate("营收增长稳健", sk) is None
+    assert direction_gate("营收大幅回落", sk) is not None
