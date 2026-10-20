@@ -341,6 +341,258 @@ def test_stitch_adjacent_table_rows():
         == complete.chunk.text
 
 
+def test_rule_understand_resolves_short_company_alias():
+    """D20 简称击穿 doc_scope：query 用简称「茅台」而语料公司是全称
+    「贵州茅台」，全名子串匹配 miss → companies 空 → 检索泄漏全库
+    （实测「茅台 2026 半年度扣非」答成欧科亿 4.19 亿、引用四家混池
+    仍 verify:pass；「茅台…趋势」trend:0期 拒答）。双向子串唯一命中
+    时归一为全称；多命中歧义与通用后缀 token 不归一。"""
+
+    class Corp:
+        def __init__(self, *companies):
+            class D:
+                pass
+            self.docs = {f"d{i}": D() for i in range(len(companies))}
+            for d, co in zip(self.docs.values(), companies):
+                d.company = co
+
+    from duizhang.graph import rule_understand
+    c = Corp("贵州茅台", "中际旭创", "欧科亿")
+    assert rule_understand("茅台 2026 年半年度扣非净利润多少",
+                           c)["companies"] == ["贵州茅台"]
+    assert rule_understand("茅台近几年归母净利润趋势",
+                           c)["companies"] == ["贵州茅台"]
+    r = rule_understand("对比茅台和中际旭创 2025 年谁赚得多", c)
+    assert set(r["companies"]) == {"贵州茅台", "中际旭创"}
+    assert r["intent"] == "compare"
+    # 歧义：两家共享 token「科技」→ 不归一
+    c2 = Corp("日联科技", "海康科技")
+    assert rule_understand("科技公司哪家营收高", c2)["companies"] == []
+    # 通用后缀 token 即便唯一命中也不归一
+    c3 = Corp("日联科技")
+    assert rule_understand("科技公司营收多少", c3)["companies"] == []
+
+
+def test_trend_skeleton_line_level_rows():
+    """D21 行级抽取：主要会计数据表块无标点，句级切分把整块当一句，
+    pick(净利润) 与 pick(营业收入) 命中同一句 → 归母=营收同值、部分
+    期归母整行缺失（茅台实测 506.0/506.0），verify 满分放行——数字
+    确实都在引用页，闸门管不住取错行。行级切分 + 指标词之后取首个
+    大数，两指标独立取值。"""
+    from duizhang.graph import trend_skeleton
+    blk = _hit("a#p1#1", "贵州茅台_2025Q1", 1, 1,
+               "营业收入（元） 50,605,268,444.40 45,024,567,890.12 12.4%\n"
+               "归属于上市公司股东的净利润（元） 26,852,113,255.66 "
+               "24,022,335,566.77 11.8%", 1)
+
+    class C:
+        @staticmethod
+        def chunks_page(doc_id, page):
+            return [blk.chunk]
+
+    out = trend_skeleton([blk], corpus=C())
+    assert "营收 506.1 亿" in out
+    assert "归母净利 268.5 亿" in out        # 句级时这里与营收同值（506.1）
+
+
+def test_extractive_caliber_mirror_prefers_koufei_row():
+    """口径镜像（D16 补面）：问句明确要扣非时，不含「扣除/扣非」的
+    净利润句是归母口径——词面重叠相同（净利润）但口径不符。茅台
+    2026H1 实测：445.17 亿归母散文句顶掉 44,464,207,646.01 扣非行
+    （问句「扣非」与证据「扣除非经常性损益」零词面重叠，守卫放行
+    了但打分赢不了）。降权让位，降权不跳过（「扣非和归母差多少」
+    类双口径问句仍可见归母句）。"""
+    from duizhang.answer import extractive_answer
+    from duizhang.schemas import Chunk, Retrieved
+    prose = Retrieved(chunk=Chunk(chunk_id="m#p6#2", doc_id="贵州茅台_2026H1",
+                                  page=6, seq=2,
+                                  text="归属于上 市公司股东的净利润 445.17 亿元，同比下降 1.95%。"),
+                      score=0.5, rank=1)
+    row = Retrieved(chunk=Chunk(chunk_id="m#p5#7", doc_id="贵州茅台_2026H1",
+                                page=5, seq=7,
+                                text="归属于上市公司股东的扣除非经常性损益的净利润（元） "
+                                     "44,464,207,646.01 41,322,554,123.45 7.60%"),
+                    score=0.4, rank=2)
+    st = {"query": "茅台 2026 年半年度扣非净利润多少",
+          "effective_query": "茅台 2026 年半年度扣非净利润多少"}
+    body, _ = extractive_answer(st, [prose, row])
+    assert "44,464,207,646.01" in body
+    assert body.index("44,464,207,646.01") < body.index("445.17")   # 扣非行在前
+
+
+def test_trend_pick_survives_koufei_label_tail_on_same_line():
+    """D21 行级守卫精化：主要会计数据表块行内拼接——归母行与下一个
+    「扣非」标签尾巴（…扣除非经）同处一行，整行含「扣除」就跳过会把
+    归母行陪葬（茅台 2025H1/2026H1 归母缺失实测）。守卫改为只看指标
+    词前 20 字的标签上下文：归母自己的标签（归属于上市公司股东的）
+    不含扣除 → 放行；扣非行的标签含扣除 → 照旧跳过。"""
+    from duizhang.graph import trend_skeleton
+    blk = _hit("a#p5#2", "贵州茅台_2025H1", 5, 2,
+               "营业收入 89,389,354,416.84 81,930,977,667.75 9.10 "
+               "利润总额 62,778,000,766.82 57,578,281,653.44 9.03 "
+               "归属于上市公司股东的净利润 45,402,962,298.10 "
+               "41,695,610,983.37 8.89 归属于上市公司股东的扣除非经",
+               1)
+
+    class C:
+        @staticmethod
+        def chunks_page(doc_id, page):
+            return [blk.chunk]
+
+    out = trend_skeleton([blk], corpus=C())
+    assert "营收 893.9 亿" in out
+    assert "归母净利 454.0 亿" in out      # 整行守卫时：扣除陪葬 → 缺失
+
+
+def test_trend_pick_falls_back_when_best_line_fails_parse():
+    """D21 名次回退：MD&A 散文句（「净利润 454.03 亿元，同比增长
+    8.89%」）带 % 打分高于表行（无 % 号），但亿元级散文过不了
+    ≥1e6 原币门槛——只取最佳一行会 解析 None→该指标整行丢失
+    （茅台 2025H1/2026H1 归母缺失实测根因）。按分数降序回退到
+    第一个可解析行。"""
+    from duizhang.graph import trend_skeleton
+    table = _hit("a#p5#2", "贵州茅台_2025H1", 5, 2,
+                 "营业收入 89,389,354,416.84 81,930,977,667.75 9.10 "
+                 "利润总额 62,778,000,766.82 57,578,281,653.44 9.03 "
+                 "归属于上市公司股东的净利润 45,402,962,298.10 "
+                 "41,695,610,983.37 8.89", 1)
+    prose = _hit("a#p7#1", "贵州茅台_2025H1", 7, 1,
+                 "一是主要指标稳定向好。上半年，公司营业总收入 910.94 亿元，"
+                 "同比增长 9.16%；归属于上 市公司股东的净利润 454.03 亿元，"
+                 "同比增长 8.89%，", 2)
+
+    class C:
+        @staticmethod
+        def chunks_page(doc_id, page):
+            return []
+
+    out = trend_skeleton([table, prose], corpus=C())
+    assert "归母净利 454.0 亿" in out       # 散文赢打分但解析不过 → 回退表行
+
+
+def test_extractive_sibling_metric_demotion():
+    """指标口径配对降权（D16 家族）：问句点名指标 X 时，只谈同胞指标
+    Y 的句子与 X 共享标签前缀词（归属于上市公司股东的…），打分虚高
+    冒名顶替——② 问扣非/净利润时净资产句让位（茅台 2026H1 实测
+    净资产块 4.4 分顶掉扣非行 1.6 分，44,464,207,646.01 落选）；
+    ③ 问总收入时营业收入句让位（子口径冒充总口径，真值 92,278,
+    072,083.21，P1#5）。"""
+    from duizhang.answer import extractive_answer
+    from duizhang.schemas import Chunk, Retrieved
+
+    def _mk(cid, page, seq, text, rank):
+        return Retrieved(chunk=Chunk(chunk_id=cid, doc_id="贵州茅台_2026H1",
+                                     page=page, seq=seq, text=text),
+                         score=0.5, rank=rank)
+
+    jingzichan = _mk("m#p5#6", 5, 6,
+                     "归属于上市公司股东的净资产 251,253,594,419.50 "
+                     "244,637,811,032.18 2.70 总资产 309,050,784,569.31", 1)
+    koufei = _mk("m#p5#4", 5, 4,
+                 "常性损益的净利润 44,464,207,646.01 45,390,247,623.82 "
+                 "-2.04 经营活动产生的现金流量净额 70,690,750,119.06", 2)
+    st = {"query": "茅台 2026 年半年度扣非净利润多少",
+          "effective_query": "茅台 2026 年半年度扣非净利润多少"}
+    body, _ = extractive_answer(st, [jingzichan, koufei])
+    assert "44,464,207,646.01" in body            # 断词修复+净资产让位后扣非行当选
+
+    shouru = _mk("m#p30#1", 30, 1,
+                 "营业收入 90,703,260,964.48 89,389,354,416.84 1.47", 1)
+    zongshouru = _mk("m#p30#2", 30, 2,
+                     "营业总收入 92,278,072,083.21 91,083,690,144.10 1.31", 2)
+    # 前置（D14）把主要会计数据表页 8 块顶到队头后，利润表真值行会被
+    # 挤到 rank 9+——抽取窗须扫到 12，否则总收入题永远看不见利润表
+    pad = [_mk(f"m#p5#{i}", 5, i, "附注说明文字", 10 + i) for i in range(8)]
+    st2 = {"query": "贵州茅台 2026 半年度营业总收入多少",
+           "effective_query": "贵州茅台 2026 半年度营业总收入多少"}
+    body2, _ = extractive_answer(st2, pad + [shouru, zongshouru])
+    assert "92,278,072,083.21" in body2
+    assert body2.index("92,278,072,083.21") < body2.index("90,703,260,964.48")
+
+    # ④⑤ 问总资产：净利润族句共享「归属于…的」前缀词族；利润表头句
+    # （营业总收入…其中：营业收入…）吃 rewrite 追加词+expand 收入族
+    # 映射的三重叠（4.2 分），实测顶掉 1 重叠的总资产真值行 31,582,
+    # 872,453.01（innolight 30/31 回退根因）
+    jingli = _mk("x#p10#1", 10, 1,
+                 "1.归属于母公司所有者的净利润 1,582,876,128.67 1,009,266,297.74", 1)
+    p9 = _mk("x#p9#1", 9, 1,
+             "一、营业总收入 6,674,176,487.23 4,842,546,924.23 "
+             "其中：营业收入 6,674,176,487.23 4,842,546,924.23", 2)
+    zongzichan = _mk("x#p3#9", 3, 9,
+                     "总资产（元） 31,582,872,453.01 28,866,276,555.26 9.41%", 3)
+    st3 = {"query": "中际旭创 2025 年一季度末总资产多少",
+           "effective_query": "中际旭创 2025 年一季度末总资产多少 "
+                              "预计 营业收入 净利润 同比"}
+    body3, _ = extractive_answer(st3, [jingli, p9, zongzichan])
+    assert "31,582,872,453.01" in body3
+    for other in ("1,582,876,128.67", "6,674,176,487.23"):
+        if other in body3:
+            assert body3.index("31,582,872,453.01") < body3.index(other)
+
+
+def test_caliber_mismatch_gate():
+    """口径数值闸（D22）：问句点名口径（扣非/总收入）时，答案大数必须
+    出现在该口径标签行的数字集里——0.8b 实测拿归母 44,516,880,421.86
+    答扣非题、营业收入 90,703,260,964.48 答总收入题，数字都在证据页
+    verify 照样 pass（引用级闸门够不着行选择，§9 边界第一处收口）。
+    证据无该口径行 → False（检索缺口不归闸门背）。"""
+    from duizhang.graph import caliber_mismatch
+    from duizhang.schemas import Chunk
+
+    def _c(text):
+        return Chunk(chunk_id="x", doc_id="贵州茅台_2026H1", page=5, seq=1,
+                     text=text)
+
+    chunks = [_c("归属于上市公司股东的净利润 44,516,880,421.86 45,402,962,298.10\n"
+                 "常性损益的净利润 44,464,207,646.01 45,390,247,623.82")]
+    assert caliber_mismatch("扣非净利润多少", "净利润 44,516,880,421.86 元",
+                            chunks) is True
+    assert caliber_mismatch("扣非净利润多少", "扣非 44,464,207,646.01 元",
+                            chunks) is False
+    assert caliber_mismatch("营业收入多少", "90,703,260,964.48", chunks) is False
+    zong = [_c("一、营业总收入 92,278,072,083.21 其中：营业收入 "
+               "90,703,260,964.48")]
+    assert caliber_mismatch("营业总收入多少", "总收入 90,703,260,964.48 元",
+                            zong) is True
+    assert caliber_mismatch("营业总收入多少", "总收入 92,278,072,083.21 元",
+                            zong) is False
+    assert caliber_mismatch("扣非净利润多少", "无数字答案", chunks) is False
+    # 标签/数值分块行（D16 场景）：标签行无数字，good-set 取其下一行
+    split_rows = [_c("归属于上市公司股东的扣除 非经常性损益的净利润 （元）"),
+                  _c("1,568,385,287.19 990,216,569.13 58.39%")]
+    assert caliber_mismatch("扣非净利润多少", "扣非 1,582,876,128.67 元",
+                            split_rows) is True
+    assert caliber_mismatch("扣非净利润多少", "扣非 1,568,385,287.19 元",
+                            split_rows) is False
+
+
+def test_page_evidence_stratifies_pages():
+    """页级证据分层取样：前置（D14）会把主要会计数据表页 8+ 块顶到
+    hits 队头，原 hits[:top_n] 切片全落在同一页——利润表/MD&A 页永远
+    进不了 LLM 证据（总收入题 0.8b 只见 p5 营业收入行）。改为扫到凑
+    满 top_n 个不同页为止。"""
+    from duizhang.graph import page_evidence
+
+    def _h(cid, page, seq):
+        return _hit(cid, "贵州茅台_2026H1", page, seq, f"块{cid}", 1)
+
+    page5 = [_hit(f"a#5#{j}", "贵州茅台_2026H1", 5, j, f"p5块{j}", j + 1)
+             for j in range(4)]
+    page30 = [_hit("a#30#8", "贵州茅台_2026H1", 30, 8, "p30利润表", 5)]
+
+    class C:
+        @staticmethod
+        def chunks_page(doc_id, page):
+            if page == 5:
+                return page5 and [h.chunk for h in page5]
+            return [page30[0].chunk]
+
+    out = page_evidence(page5 + page30, corpus=C(), top_n=2, window=0)
+    got_pages = {(c.doc_id, c.page) for c in out}
+    assert (page5[0].chunk.doc_id, 5) in got_pages
+    assert (page30[0].chunk.doc_id, 30) in got_pages   # 分层后第二页在场
+
+
 def test_trend_skeleton_rejects_koufei_for_default_caliber():
     """口径守卫：skeleton 的「归母净利」默认归母口径——含「扣除/
     扣非」的行是另一口径，词面同样含「净利润」，不加守卫时先到

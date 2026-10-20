@@ -105,7 +105,15 @@ def page_evidence(hits, corpus, top_n: int = 4, window: int = 2,
     1 块，兄弟块从不自动在场——实测证伪「相邻块共召回」）。"""
     out, seen_pages = [], set()
     chunks_page = getattr(corpus, "chunks_page", None)
-    for h in hits[:top_n]:
+    # 按页分层取样：前置（D14）把主要会计数据表页 8+ 块顶到 hits 队头，
+    # 切 hits[:top_n] 会全落同一页——利润表/MD&A 页进不了 LLM 证据
+    # （总收入题 0.8b 只见 p5 营业收入行，实测）。扫到凑满 top_n 个
+    # 不同页为止，总量仍受 cap 硬顶。窗仍锚各页首个命中 ±2——同页
+    # 全命中并窗实测净负（0.8b 上下文稀释，0.778 vs 0.852，D14 cap
+    # 哲学同源：淹没比缺席更伤小模型）。
+    for h in hits:
+        if len(seen_pages) >= top_n or len(out) >= cap:
+            break
         key = (h.chunk.doc_id, h.chunk.page)
         if key in seen_pages:
             continue
@@ -214,12 +222,84 @@ def front_key_table(hits, u, query, corpus, cap: int = _FRONT_CAP) -> list:
     get_page = getattr(corpus, "chunks_page", None)
     if probe and get_page:
         kdoc, kpage = probe[0].chunk.doc_id, probe[0].chunk.page
+        page_chunks = get_page(kdoc, kpage)
         key_page_chunks = [
             Retrieved(chunk=c, score=0.3, rank=i)
-            for i, c in enumerate(get_page(kdoc, kpage)[:cap])]
+            for i, c in enumerate(page_chunks[:cap])]
+        # #6 窗口扩展：长页净资产行可落在 cap 之外（innolight Q29 类），
+        # 页内与查询指标词有词面命中的表内块也纳入前置，总量封顶 cap*2
+        qtoks = set(word_tokens(expand_query(query)))
+        for c in page_chunks[cap:cap * 2]:
+            if qtoks & set(word_tokens(c.text)):
+                key_page_chunks.append(
+                    Retrieved(chunk=c, score=0.3, rank=len(key_page_chunks)))
     probe_ids = {c.chunk.chunk_id for c in key_page_chunks}
     return key_page_chunks + [h for h in hits
                               if h.chunk.chunk_id not in probe_ids]
+
+
+def _line_nums(text: str) -> set[str]:
+    """文本中的大数集合（≥6 位含逗号分隔，如 44,464,207,646.01）。"""
+    return set(re.findall(r"\d[\d,]{5,}(?:\.\d+)?", text))
+
+
+def _caliber_nums(lines: list[str], pred) -> set[str]:
+    """口径标签行的数字集：标签/数值分块行（D16 场景，标签行无数字）
+    取标签行的下一行数字并入。"""
+    out: set[str] = set()
+    for i, ln in enumerate(lines):
+        if pred(ln):
+            got = _line_nums(ln)
+            out |= got
+            if not got and i + 1 < len(lines):
+                out |= _line_nums(lines[i + 1])
+    return out
+
+
+def caliber_mismatch(query: str, answer: str, chunks) -> bool:
+    """口径数值闸（D22）：问句点名口径（扣非/总收入/净资产/总资产）
+    时，答案的大数必须出现在该口径标签行的数字集里——0.8b 实测拿归母
+    44,516,880,421.86 答扣非题、营业收入 90,703,260,964.48 答总收入
+    题：数字都在证据页，verify 引用级照样 pass（gate≠correctness，
+    §9 边界的第一处收口——引用级对账之上加口径级数值对账）。证据里
+    没有该口径行 → False（检索缺口不归闸门背锅，交给降级抽取式）。
+    """
+    if ("扣非" not in query and "扣除非" not in query and "总收入" not in query
+            and "净资产" not in query and "总资产" not in query):
+        return False
+    ans_nums = _line_nums(answer)
+    if not ans_nums:
+        return False
+    # 逐行修复断词残片（块级修复只看块首，多行块的后续行残片会漏）
+    lines = [ans.split_fix(ln) for c in chunks for ln in c.text.splitlines()]
+    good_sets: list[set[str]] = []
+    if "扣非" in query or "扣除非" in query:
+        good_sets.append(_caliber_nums(
+            lines, lambda ln: ("扣除" in ln or "扣非" in ln) and "净利润" in ln))
+    if "净资产" in query and "总资产" not in query:
+        good_sets.append(_caliber_nums(
+            lines, lambda ln: "净资产" in ln and "总资产" not in ln))
+    if "总资产" in query:
+        good_sets.append(_caliber_nums(lines, lambda ln: "总资产" in ln))
+    if "总收入" in query:
+        # 段级截取：利润表头行总/子口径数字混居（「营业总收入 92,278
+        # … 其中：营业收入 90,703 …」），行级数字集分不开——取总收入
+        # 标签之后、子口径标签（其中/营业收入）之前的段
+        seg = set()
+        for ln in lines:
+            if "总收入" not in ln:
+                continue
+            rest = ln[ln.find("总收入"):]
+            for stop in ("其中", "营业收入"):
+                j = rest.find(stop)
+                if j > 0:
+                    rest = rest[:j]
+            seg |= _line_nums(rest)
+        good_sets.append(seg)
+    for good in good_sets:
+        if good and not (ans_nums & good):
+            return True
+    return False
 
 
 def _parse_metric_row(text: str) -> tuple[str, str] | None:
@@ -265,34 +345,57 @@ def trend_skeleton(hits, corpus=None) -> str:
                      if c.chunk_id not in {x.chunk_id for x in pool}]
 
         def pick(require: str) -> str | None:
-            best_s, best_sc = "", -99
+            cands: list[tuple[int, str]] = []
             for c in pool:
-                c_text = c.text
-                for frag, full in (("润（元）", "净利润"), ("入（元）", "营业收入"),
-                                   ("者权益（元）", "归属于上市公司股东的净资产")):
-                    if c_text.lstrip().startswith(frag):
-                        c_text = full + " " + c_text
-                        break
-                for sent in ans._sentences(c_text):
-                    if require not in sent:
+                for raw in c.text.splitlines():
+                    line = raw.strip()
+                    if not line:
                         continue
-                    # 口径守卫（D16）：含「扣除/扣非」的是另一口径，词面
-                    # 同样含「净利润」，先到先得会拿扣非数当归母（实测
-                    # 15.7 亿顶掉 15.8 亿）。默认口径=归母；要求扣非口径
-                    # 时 require 自身含「扣非」。
-                    if ("扣除" in sent or "扣非" in sent) and "扣非" not in require:
+                    for frag, full in (("润（元）", "净利润"), ("入（元）", "营业收入"),
+                                       ("者权益（元）", "归属于上市公司股东的净资产"),
+                                       ("常性损益的净利润", "扣除非经常性损益的净利润")):
+                        if line.startswith(frag):
+                            line = full + " " + line
+                            break
+                    if require not in line:
                         continue
-                    if not re.search(r"\d", sent):
+                    # 口径守卫（D16，D21 行级精化）：含「扣除/扣非」的是
+                    # 另一口径，词面同样含「净利润」，先到先得会拿扣非数
+                    # 当归母（实测 15.7 亿顶掉 15.8 亿）。但表块行内拼接
+                    # 时归母行与下一行「扣非」标签尾巴同处一行，整行含
+                    # 「扣除」就跳过会把归母陪葬——只看指标词前 20 字的
+                    # 标签上下文：归母自己的标签不含扣除，放行；扣非行
+                    # 的标签含扣除，照旧跳过。要求扣非口径时 require 自身
+                    # 含「扣非」。
+                    idx = line.find(require)
+                    ctx = line[max(0, idx - 20):idx]
+                    if ("扣除" in ctx or "扣非" in ctx) and "扣非" not in require:
                         continue
+                    if not re.search(r"\d", line):
+                        continue
+                    # D21 行级取数：表块无标点，句级切分整块一句，
+                    # pick(净利润) 与 pick(营业收入) 命中同一句 → 归母
+                    # 取到营收值（茅台 2025Q1 实测 506.0/506.0 同值、
+                    # verify 满分放行）。行内从指标词起截，取其后首个
+                    # 大数——同行多口径混排也各取各的。
+                    seg = line[idx:]
                     score = 2
-                    if "%" in sent:
+                    if "%" in seg:
                         score += 2
-                    if any(w in sent for w in ("适用", "不适用", "差异", "终止经营",
+                    if any(w in line for w in ("适用", "不适用", "差异", "终止经营",
                                                 "少数股东", "会计准则")):
                         score -= 6          # 段落噪声（2026H1 会计准则段实测）
-                    if score > best_sc:
-                        best_s, best_sc = sent, score
-            return best_s if best_sc > 0 else None
+                    cands.append((score, seg))
+            # 名次回退（D21 补面）：打分最高的行解析不过时（MD&A 散文
+            # 「454.03 亿元」带 % 赢表行、却过不了 ≥1e6 原币门槛），按
+            # 分数降序取第一个可解析行——只取最佳会让该指标整行丢失
+            # （茅台 2025H1/2026H1 归母缺失实测根因）。
+            for score, seg in sorted(cands, key=lambda x: -x[0]):
+                if score <= 0:
+                    break
+                if _parse_metric_row(seg):
+                    return seg
+            return None
 
         parts = []
         for label, key in (("营收", "营业收入"), ("归母净利", "净利润")):
@@ -329,16 +432,47 @@ def _analysis_numbers_ok(analysis: str, rows: str) -> bool:
 
 # ── 查询理解 ────────────────────────────────────────────
 
+# 通用后缀 token 不做简称归一（「科技公司营收」不得命中「日联科技」）
+_GENERIC_CO_TOKENS = ("科技", "股份", "集团", "控股", "实业", "公司")
+
+
+def _resolve_companies(cands: list[str], corpus) -> list[str]:
+    """D20 简称归一：c 与已知公司双向子串（c in k 或 k in c）且唯一
+    命中时替换为全称。query 用简称（茅台）而语料是全称（贵州茅台）
+    时，doc_scope 精确匹配 miss → 检索泄漏全库（实测「茅台 2026
+    半年度扣非」答成欧科亿 4.19 亿、四家引用混池仍 verify:pass；
+    「茅台…趋势」trend:0期 拒答）。无命中/多命中（歧义）保持原样，
+    由下游精确匹配自然失效。"""
+    known = sorted({d.company for d in corpus.docs.values() if d.company})
+    out = []
+    for c in cands:
+        if (c in known or c in _GENERIC_CO_TOKENS or len(c) < 2
+                or not "一" <= c[0] <= "鿿"):
+            out.append(c)
+            continue
+        hits = [k for k in known if c in k or k in c]
+        out.append(hits[0] if len(hits) == 1 else c)
+    return list(dict.fromkeys(out))
+
 
 def rule_understand(query: str, corpus) -> dict:
     """规则查询理解（heuristic 主路径 / LLM 故障兜底）。
 
     相比 v0.4 的 _doc_filter 只回首个公司，这里全量命中——多公司是
     compare 分解的前提。period 复用 period_hints 的互斥匹配。
+    D20：全名子串 miss 时补简称面——jieba 分词 token 双向子串归一
+    （「茅台近几年…」→ 贵州茅台），歧义/通用后缀不命中。
     """
-    companies = list(dict.fromkeys(
+    known = {d.company for d in corpus.docs.values() if d.company}
+    companies = [k for k in dict.fromkeys(
         d.company for d in corpus.docs.values()
-        if d.company and d.company in query))
+        if d.company and d.company in query)]
+    import jieba
+    toks = [t for t in jieba.cut(query)
+            if len(t) >= 2 and "一" <= t[0] <= "鿿"]
+    for k in _resolve_companies(toks, corpus):
+        if k in known and k not in companies:
+            companies.append(k)
     hints = period_hints(query)
     if len(companies) >= 2 and any(w in query for w in _COMPARE_WORDS):
         intent = "compare"
@@ -432,6 +566,10 @@ def make_nodes(corpus: Corpus):
                                    if isinstance(c, str)][:4],
                      "period": period,
                      "reason": str(r.get("reason", ""))[:80]}
+                # D20 简称归一在出口统一做：LLM 抽「茅台」→「贵州茅台」，
+                # 使下方 known 子集守卫不再触发规则兜底（兜底会把
+                # 已抽对的简称名单整体换掉）
+                u["companies"] = _resolve_companies(u["companies"], corpus)
                 trace = ["understand:llm"]
             except Exception:
                 trace = ["understand:llm→fallback"]
@@ -531,6 +669,13 @@ def make_nodes(corpus: Corpus):
                 scoped = corpus.search(eff, k=TOP_K, doc_filter=filt, doc_scope=allowed)
                 if scoped:
                     hits = scoped
+        # metric 意图：主要会计数据表页前置（原仅 agent 路有，heuristic
+        # 漏挂——茅台 2026H1 扣非 44,464,207,646.01 的数值块无标签头
+        # （PDF 抽取丢失，行首残「常性损益的净利润」），词面检索排不进
+        # top-8，前置把表页带进 hits 才可达；窗口见 front_key_table）
+        if (state.get("understanding") or {}).get("intent") == "metric":
+            hits = front_key_table(hits, state["understanding"],
+                                   state["query"], corpus)
         # 该公司该期间没有对应文档（allowed 为空或 scoped 空）→ 用未过滤结果
         return {**state, "hits": hits, "trace": [f"retrieve:{len(hits)} hits"]}
 
@@ -658,15 +803,19 @@ def make_nodes(corpus: Corpus):
             return {**state, "answer": body, "citations": cited,
                     "evidence": ev or hits, "trace": ["generate:trend"]}
         if state["mode"] == "llm" and llmx.llm_enabled():
-            # 证据按页聚合（页首标注），块序拼接；数字归一化注释随块
+            # 证据按页聚合（页首标注），块序拼接；数字归一化注释随块；
+            # 断词残行先经 split_fix 补全标签——0.8b 看到「常性损益的
+            # 净利润 44,464…」无标签残行时无从执行口径镜像，拿归母数
+            # 答扣非题（茅台 2026H1 实测）
             by_page: dict[tuple, list] = {}
             for c in page_chunks:
                 by_page.setdefault((c.doc_id, c.page), []).append(c)
             parts = []
             for (doc_id, page), cs in by_page.items():
                 body = "\n".join(
-                    c.text[:500] + (f"（数字参考：{'；'.join(c.num_notes[:3])}）"
-                                    if c.num_notes else "") for c in cs)
+                    ans.split_fix(c.text)[:500] +
+                    (f"（数字参考：{'；'.join(c.num_notes[:3])}）"
+                     if c.num_notes else "") for c in cs)
                 parts.append(f"[{doc_id} 第{page}页]\n{body}")
             evidence = "\n\n".join(parts)
 
@@ -684,14 +833,26 @@ def make_nodes(corpus: Corpus):
                     "「归属于上市公司股东的扣除非经常性损益的净利润」那一行"
                     "的本期值——「净利润（元）」行是归母口径，数值相近但不同"
                     "（0.8b 实测拿 1,582,876,128.67 答扣非题，真值"
-                    " 1,568,385,287.19）。"
+                    " 1,568,385,287.19）。问「总收入/营业总收入」时必须取"
+                    "「营业总收入」行——「营业收入」是子口径（茅台 2026H1 "
+                    "总收入 92,278,072,083.21 vs 营业收入 90,703,260,964.48），"
+                    "扣非残行行首已补全标签，按标签取行。"
                     "确实无任何"
                     "相关数字才回答「原文中没有找到依据」。",
                     f"问题：{state['query']}\n\n证据：\n{evidence}")
                 no_evidence = any(p in out for p in (
                     "没有找到依据", "未找到依据", "未找到相关", "无法从",
                     "无法确定", "无法回答")) or len(out.strip()) < 15
-                if not no_evidence:
+                # 口径数值闸（D22）：数字在场但行不对（拿归母答扣非、
+                # 拿营业收入答总收入）→ 降级抽取式（口径守卫三层已保证
+                # 抽取式取对行），数字在场引用级 verify 管不住。对照源
+                # 与 verify_citations 同律：页级集合 ∪ hits——证据窗漏掉
+                # 的行 hits 里有（总资产题实测窗只到 p3#3 而 #9 在 hits）
+                if not no_evidence and caliber_mismatch(
+                        state["query"], out,
+                        list(page_chunks) + list(hits)):
+                    fallback = ["generate:llm→caliber-mismatch→extractive"]
+                elif not no_evidence:
                     # 引用匹配空白不敏感（D13）：模型手写空格漂移
                     # （第 8 页/粘连）不该丢掉引用列表
                     cited = list(dict.fromkeys(
@@ -699,9 +860,10 @@ def make_nodes(corpus: Corpus):
                         if ans.citation_in(out, h.chunk.citation)))
                     return {**state, "answer": out, "citations": cited,
                             "evidence": page_chunks, "trace": ["generate:llm"]}
-                # LLM 判无据 → 降级抽取式（永远有真凭实据），而非拒答——
-                # 与 verify 的「降级而非失败」同一纪律
-                fallback = ["generate:llm-no-evidence→extractive"]
+                else:
+                    # LLM 判无据 → 降级抽取式（永远有真凭实据），而非拒答——
+                    # 与 verify 的「降级而非失败」同一纪律
+                    fallback = ["generate:llm-no-evidence→extractive"]
             except Exception:  # LLM 故障 → 走抽取式，绝不空手而归（留痕）
                 fallback = ["generate:llm→fallback"]
         body, cited = ans.extractive_answer(state, hits)
@@ -905,6 +1067,10 @@ def make_nodes(corpus: Corpus):
                 if r < len(chunks) and len(hits_out) < TOP_K:
                     hits_out.append(chunks[r])
             r += 1
+        # 表块拼接（D16 同款，agent 路补挂）：前置/自采的块是原始块，
+        # 标签块与数值块分离着进抽取——扣非题抽取式拿不到「标签+数字」
+        # 整行，非经常性损益明细噪声行（词面含损益）反而当选（实测）
+        hits_out = stitch_adjacent(hits_out, corpus)
         # metric 意图：主要会计数据表前置（封顶+归因跳过，见 front_key_table）
         hits_out = front_key_table(hits_out, u, state["query"], corpus)
         eff = state.get("effective_query", state["query"])

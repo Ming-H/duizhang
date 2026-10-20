@@ -208,9 +208,10 @@ def main():
     p = sub.add_parser("eval", help="跑内置评估集（agent 集含多跳对比题）")
     p.add_argument("--mode", default="auto", choices=["auto", "llm", "heuristic"])
     p.add_argument("--dataset", default="default",
-                   choices=["default", "agent", "innolight"],
+                   choices=["default", "agent", "innolight", "maotai"],
                    help="default=单跳 10 题（CI 回归）；agent=多跳对比 8 题；"
-                        "innolight=中际旭创真值 31 题（事实/趋势/陷阱/鲁棒）")
+                        "innolight=中际旭创真值 31 题（事实/趋势/陷阱/鲁棒）；"
+                        "maotai=贵州茅台真值 9 题（简称/口径/断词泛化）")
     p.set_defaults(fn=cmd_eval)
 
     args = ap.parse_args()

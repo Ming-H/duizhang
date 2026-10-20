@@ -47,6 +47,26 @@ def _content_tokens(toks, extra_meta: tuple[str, ...] = (),
     return out
 
 
+# PDF 断词工件修复表（模块级共用）：表格跨块断词让标签头丢失——
+# 数字行以残片开头（「润（元）…」=净利润、「入（元）…」=营业收入、
+# 「者权益（元）…」=归属于上市公司股东的净资产、「常性损益的净利
+# 润」=扣除非经常性损益的净利润，标签「扣除非经|常性损益」被切走）。
+# 不修复则 query 完整词与证据零重叠（真值行落选），口径镜像也无从
+# 匹配（0.8b 看到无标签残行，拿归母数答扣非题）。graph.trend_skeleton
+# 的 pick() 与 graph.generate 的 LLM 证据组装维护同族映射，三处同步
+SPLIT_FIX = (("润（元）", "净利润"), ("入（元）", "营业收入"),
+             ("额（元）", "总资产额"), ("者权益（元）", "归属于上市公司股东的净资产"),
+             ("常性损益的净利润", "扣除非经常性损益的净利润"))
+
+
+def split_fix(text: str) -> str:
+    """行首断词残片补全为完整指标名（证据侧行级修复，见 SPLIT_FIX）。"""
+    for frag, full in SPLIT_FIX:
+        if text.lstrip().startswith(frag):
+            return full + " " + text
+    return text
+
+
 def extractive_answer(state: GraphState, hits: list[Retrieved],
                       max_sents: int = 4) -> tuple[str, list[str]]:
     """从 top 命中块抽证据句：与 query 的内容词重叠（元词不计分）+ 领域加权。
@@ -56,23 +76,15 @@ def extractive_answer(state: GraphState, hits: list[Retrieved],
     # 问「原因/变动」时给归因句加权：财报的因果句式是「主要系…影响」「主要由于…所致」
     wants_reason = any(w in state["query"] for w in ("原因", "为什么", "为何", "变动"))
     _REASON_PAT = re.compile(r"主要系|主要因|主要由于|所致|影响")
-    # PDF 断词工件注入：主要会计数据表的标签行（无数字表块）被空表头
-    # 过滤丢弃后，数字行以断词残片开头——「润（元）…」实为「净利润」、
-    # 「入（元）…」实为「营业收入/收入」。不注入则 query 的完整词与
-    # 证据零重叠，真值行落选（实测 2025Q1 归母净利行）。「者权益（元）」
-    # 实为「归属于上市公司股东的净资产」行（净资产题实测落选）。
-    # graph.trend_skeleton 的 pick() 维护同族映射，两处同步
-    _SPLIT_FIX = (("润（元）", "净利润"), ("入（元）", "营业收入"),
-                  ("额（元）", "总资产额"), ("者权益（元）", "归属于上市公司股东的净资产"))
 
     def _inject(text: str) -> str:
-        for frag, full in _SPLIT_FIX:
-            if text.lstrip().startswith(frag):
-                return full + " " + text
-        return text
+        return split_fix(text)
 
     scored = []
-    for h in hits[:8]:   # 与 TOP_K 对齐：表格大块常占前排，答案块在 6 名开外
+    # 抽取窗 12（原 8 与 TOP_K 对齐）：D14 前置会把主要会计数据表页
+    # 8+ 块顶到队头，利润表/附注的真值行被挤到 rank 9+——问「营业
+    # 总收入」的真值在利润表页（茅台 2026H1 p30 实测 rank10 落选）
+    for h in hits[:12]:
         company = h.chunk.doc_id.split("_", 1)[0]   # doc_id = 公司_报告期
         for s in _sentences(_inject(h.chunk.text)):
             # 口径守卫（D16 同款，与 trend pick() 一致）：问句未提「扣」
@@ -84,6 +96,8 @@ def extractive_answer(state: GraphState, hits: list[Retrieved],
             stoks = _content_tokens(set(word_tokens(s)) | set(word_tokens(h.chunk.text[:40])),
                                     extra_meta=(company,), meta_chars=frozenset(company))
             overlap = len(q & stoks)
+            if overlap == 0:
+                continue          # 零重叠句只靠 num_notes 加分混进答案（实测净资产句）
             # 数字句优先（财报问答大多数时候在问数字）
             has_num = bool(re.search(r"\d", s)) or bool(h.chunk.num_notes)
             score = overlap * (1.4 if has_num else 1.0) + (0.2 if h.chunk.num_notes else 0.0)
@@ -91,6 +105,36 @@ def extractive_answer(state: GraphState, hits: list[Retrieved],
             # 上市公司股东的净利润（元）」）词面完美匹配扩展词却无值，
             # 会压过真值行（扩展词引入后实测）
             if not has_num and any(w in state["query"] for w in ("多少", "几")):
+                score *= 0.3
+            # 指标口径配对降权（D16 家族，P0 泛化实测）：问句点名指标 X
+            # 时，只谈同胞指标 Y 的句子与 X 共享标签前缀词（归属于上市
+            # 公司股东的…），打分虚高冒名顶替。三对（降权不跳过——双
+            # 口径问句「扣非和归母差多少」仍要看到对方）：
+            # ① 问扣非：无「扣除/扣非」的净利润句是归母口径（茅台
+            #    2026H1 实测 445.17 亿散文句顶掉 44,464,207,646.01）
+            # ② 问净利润：净资产句共享前缀词（实测净资产块 4.4 分把
+            #    扣非行 1.6 分挤出前四，44,464 落选）
+            # ③ 问总收入：营业收入句是子口径不是总口径（真值
+            #    92,278,072,083.21 被营业收入行冒充，2026H1 p30）
+            q_raw = state["query"]
+            if (("扣非" in q_raw or "扣除非" in q_raw)
+                    and "净利润" in s and "扣除" not in s and "扣非" not in s):
+                score *= 0.3
+            if ("净利润" in q_raw or "净利" in q_raw) and "净资产" not in q_raw \
+                    and "总资产" not in q_raw and "净资产" in s and "净利润" not in s:
+                score *= 0.3
+            if "总收入" in q_raw and "营业收入" in s and "总收入" not in s:
+                score *= 0.3
+            # ④ 问总资产：净利润族句共享「归属于…的」前缀词族（expand
+            #    的净资产→所有者权益 token 给它 2 重叠，实测顶掉 1 重叠
+            #    的总资产真值行，innolight 30/31 回退）
+            if ("总资产" in q_raw and "净利" not in q_raw
+                    and "净利润" in s and "总资产" not in s):
+                score *= 0.3
+            # ⑤ 问总资产且未问收入：利润表头句吃 rewrite 追加词+expand
+            #    收入族映射的三重叠（实测 4.2 分顶掉总资产行 1.6 分）
+            if ("总资产" in q_raw and "收入" not in q_raw and "营收" not in q_raw
+                    and ("营业收入" in s or "总收入" in s) and "总资产" not in s):
                 score *= 0.3
             if wants_reason and _REASON_PAT.search(s):
                 score += 1.5
