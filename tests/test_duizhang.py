@@ -1428,8 +1428,9 @@ def test_quarter_view_unified_series():
     items, derived = _quarter_view(entries, n=4)
     text = "\n".join(t for _, t in items)
     assert "X_2025Q1（单季）：营收 66.7 亿（同比 37.82%）" in text
-    assert "X_2025Q2（单季·派生）：营收 81.1 亿" in text      # H1−Q1
-    assert "X_2025Q3（单季·派生）：营收 102.1 亿" in text     # 三季报累计−H1（新差分）
+    assert "X_2025Q2（单季·派生，环比" in text            # H1−Q1 + 环比（v0.6.7）
+    assert "营收 81.1 亿" in text
+    assert "营收 102.1 亿" in text                          # 三季报累计−H1（新差分）
     assert len(items) == 3
     assert any(d["label"] == "X_2025Q3营收" for d in derived)  # 出口重算登记
     assert any(d["label"] == "X_2025Q2归母净利" for d in derived)

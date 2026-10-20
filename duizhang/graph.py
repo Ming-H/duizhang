@@ -111,7 +111,9 @@ def _wants_trend(query: str) -> bool:
     """trend 语义判定（_TREND_WORDS ∪ 需差分的单季问法）——
     understand/route 守卫三处共用，口径必须一致。"""
     return any(w in query for w in _TREND_WORDS) or bool(_DERIVE_Q_RE.search(query))
-_PERIOD_MONTH = {"Q1": 3, "H1": 6, "H1E": 7, "Q3": 9, "Q3E": 10, "FY": 12}
+_PERIOD_MONTH = {"Q1": 3, "Q2": 6, "H1": 6, "H1E": 7, "Q3": 9, "Q3E": 10,
+                 "Q4": 12, "FY": 12}   # Q2/Q4（v0.6.7）：单季派生行的排序键，
+                                      # 缺席时 key=0 排最前，Q1 环比对着 Q4 算
 _re_digits = re.compile(r"\d")
 
 
@@ -597,15 +599,37 @@ def _derive_quarters(entries: list[dict]) -> tuple[list[tuple], list[dict]]:
     return items, derived
 
 
+_CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7,
+           "八": 8, "九": 9}
+
+
+def _quarter_window(query: str) -> dict | None:
+    """问句的季度窗口语义 → {"year": "2025"|None, "n": 4}|None。
+    两种形态：年份切片（「25年4个季度/2025年四个季度」→ 该日历年
+    Q1–Q4）与相对窗口（「近/最近/过去 N 个季度」→ 最近 N 季）。
+    作为 understand LLM 抽取的规则兜底（双脑纪律）——正则永远打地鼠，
+    语义理解的主责在模型，这里只保零 key 模式可用。"""
+    m = re.search(r"(20\d{2}|[12]\d)\s*年\s*的?\s*([1-9一二三四五六七八九])"
+                  r"\s*个?\s*季度", query)
+    if m:
+        y = m.group(1)
+        year = y if len(y) == 4 else "20" + y
+        return {"year": year, "n": int(_CN_NUM.get(m.group(2), m.group(2)))}
+    m = re.search(r"(?:近|最近|过去)\s*([1-9一二三四五六七八九]|\d+)"
+                  r"\s*个?\s*季", query)
+    if m:
+        return {"year": None, "n": int(_CN_NUM.get(m.group(1), m.group(1)))}
+    return None
+
+
 def _quarter_n(query: str) -> int | None:
-    """「近N个季度」信号 → N（单季统一视图触发器）。**必须带数字**：
-    「最近几个季度/近几年」保持报告期视图——innolight/多轮既有趋势题
-    的关键词锚在 as-reported 值（H1/FY 亿值）上，无数字切换会整体回退。"""
-    m = re.search(r"(?:近|最近|过去)\s*(\d+)\s*个?\s*季", query)
-    return int(m.group(1)) if m else None
+    """兼容旧签名：窗口存在则返回 n。"""
+    w = _quarter_window(query)
+    return w["n"] if w else None
 
 
-def _quarter_view(entries: list[dict], n: int = 4) -> tuple[list[tuple], list[dict]]:
+def _quarter_view(entries: list[dict], n: int = 4, year: str | None = None
+                  ) -> tuple[list[tuple], list[dict]]:
     """统一单季视图（v0.6.6）：把报告期口径折算成日历季度序列——
     Q1 直取（一季报即首季累计）、Q2=H1−Q1、Q3=三季报累计−H1、
     Q4=FY−三季报累计（三组差分操作数同为「年初至期末累计」，口径对齐
@@ -630,14 +654,15 @@ def _quarter_view(entries: list[dict], n: int = 4) -> tuple[list[tuple], list[di
 
     for comp, ents in by_comp.items():
         years = sorted({e["period"][:4] for e in ents
-                        if e["period"][:4].isdigit()})
-        for year in years:
+                        if e["period"][:4].isdigit()
+                        and (not year or e["period"][:4] == year)})
+        for y_ in years:
             for q in ("Q1", "Q2", "Q3", "Q4"):
                 parts: list[str] = []
                 cites: list[str] = []
                 if q == "Q1":
                     e = next((x for x in ents
-                              if x["tag"] == "Q1" and x["period"][:4] == year),
+                              if x["tag"] == "Q1" and x["period"][:4] == y_),
                              None)
                     if not e:
                         continue
@@ -651,8 +676,8 @@ def _quarter_view(entries: list[dict], n: int = 4) -> tuple[list[tuple], list[di
                                       "Q3": ("Q3", "H1"),
                                       "Q4": ("FY", "Q3")}[q]
                     for label in ("营收", "归母净利"):
-                        hi = find(comp, year, hi_tag, label)
-                        lo = find(comp, year, lo_tag, label)
+                        hi = find(comp, y_, hi_tag, label)
+                        lo = find(comp, y_, lo_tag, label)
                         if not (hi and lo and hi["raw"] and lo["raw"]):
                             continue
                         val = hi["raw"] - lo["raw"]
@@ -660,24 +685,43 @@ def _quarter_view(entries: list[dict], n: int = 4) -> tuple[list[tuple], list[di
                             continue
                         parts.append(
                             f"{label} {val / 1e8:,.1f} 亿"
-                            f"（= {year}{hi_tag} {hi['yi']} − {year}{lo_tag} "
+                            f"（= {y_}{hi_tag} {hi['yi']} − {y_}{lo_tag} "
                             f"{lo['yi']}，原文未直接披露）")
                         cites += [hi["citation"], lo["citation"]]
-                        derived.append({"label": f"{comp}_{year}{q}{label}",
+                        derived.append({"label": f"{comp}_{y_}{q}{label}",
                                         "value": val, "a": hi["raw"],
                                         "b": lo["raw"]})
                     if not parts:
                         continue
                     mark = "单季·派生"
-                items.append((_period_key(f"{year}{q}"),
-                              f"· {comp}_{year}{q}（{mark}）：" +
+                items.append((_period_key(f"{y_}{q}"),
+                              f"· {comp}_{y_}{q}（{mark}）：" +
                               "；".join(parts) + " " +
                               " ".join(dict.fromkeys(cites))))
     items.sort(key=lambda x: x[0])
-    return items[-n:], derived
+    if not year:                      # 相对窗口取最近 n 季；年份切片天然全年
+        items = items[-n:]
+    # 环比（确定性算子，v0.6.7）：相邻单季的趋势量，叙述答「上升/下降」
+    # 直接有据；数字进骨架即进 verify 证据池（合成块机制）
+    prev: dict[str, float] = {}
+    out_items = []
+    for key, line in items:
+        m = re.match(r"· (\S+?)_\d{4}Q\d（", line)
+        comp_q = m.group(1) if m else ""
+        vm = re.search(r"营收 ([\d,.]+) 亿", line)
+        if comp_q and vm:
+            cur = float(vm.group(1).replace(",", ""))
+            p_ = prev.get(comp_q)
+            if p_ and p_ > 0:
+                qoq = (cur - p_) / p_ * 100
+                line = line.replace("）：", f"，环比 {qoq:+.1f}%）：", 1)
+            prev[comp_q] = cur
+        out_items.append((key, line))
+    return out_items, derived
 
 
-def trend_skeleton_ex(hits, corpus=None, quarter_n: int | None = None
+def trend_skeleton_ex(hits, corpus=None, quarter_n: int | None = None,
+                      quarter_year: str | None = None
                       ) -> tuple[str, list[dict], list[dict]]:
     """趋势数据层全量版（v0.7）：返回 (骨架文本, 事实行, 派生登记)。
     骨架文本 = as-reported 行 + 派生单季行按时间序交错；事实行进
@@ -688,7 +732,7 @@ def trend_skeleton_ex(hits, corpus=None, quarter_n: int | None = None
     if not entries:
         return "", [], []
     if quarter_n:
-        q_items, q_derived = _quarter_view(entries, quarter_n)
+        q_items, q_derived = _quarter_view(entries, quarter_n, quarter_year)
         if q_items:
             return "\n".join(t for _, t in q_items), [], q_derived
     items: list[tuple] = []
@@ -1282,9 +1326,10 @@ def make_nodes(corpus: Corpus):
         # ——heuristic 同样输出逐期骨架（此前被 llm 条件包裹退化成
         # 普通抽取式，doc=N 实测）
         if (state.get("understanding") or {}).get("intent") == "trend":
-            qn = _quarter_n(state["query"])   # 「近N个季度」→ 单季统一视图
-            skeleton, fact_rows, derived = trend_skeleton_ex(hits, corpus,
-                                                             quarter_n=qn)
+            qw = _quarter_window(state["query"])
+            skeleton, fact_rows, derived = trend_skeleton_ex(
+                hits, corpus, quarter_n=qw and qw["n"],
+                quarter_year=qw and qw["year"])
             if not skeleton:
                 return {**state, "answer": "", "verdict": "refused",
                         "trace": ["generate:trend-no-facts→refuse"]}
@@ -1305,11 +1350,11 @@ def make_nodes(corpus: Corpus):
                 caliber_rule = (
                     "①数据行均为**单季口径**（标注「派生」的为累计数差分"
                     "所得，如 Q2=H1−Q1），单季之间**环比可比**，跨年同季"
-                    "看同比" if qn else
+                    "看同比" if qw else
                     "①H1 是半年累计、Q1 是单季、Q3 是前三季累计——绝对值"
                     "不可直接比较，跨期方向只看同比增速")
                 first_sent = ("；⑤若问题问上升/下降，第一句必须直接给出"
-                              "方向结论并带依据数字" if qn else "")
+                              "方向结论并带依据数字" if qw else "")
                 prompt = (
                     "你是财报分析师。基于给定逐期数据做投资分析（趋势判断/"
                     "盈利质量/风险点）。铁律：" + caliber_rule +
@@ -1887,15 +1932,17 @@ def make_nodes(corpus: Corpus):
             w in state["query"] for w in ("每季", "各季", "分季", "每季度"))
         # 「近N个季度」单季统一视图（v0.6.6）：同样需要 FY 回收（Q4 差分
         # 操作数），且窗口随 N 放大（4 个日历季跨两年取原料）
-        qn_ = _quarter_n(state["query"])
-        if qn_:
+        qw = _quarter_window(state["query"])   # 模型语义的规则兜底
+        if qw:
             want_quarters = True
         sfxs = ("Q1", "H1", "Q3", "FY", "H1E") if want_quarters \
             else ("Q1", "H1", "Q3", "H1E")
-        cap = max(8, (qn_ or 0) * 2 + 2) if want_quarters else 6
+        cap = max(8, (qw or {}).get("n", 0) * 2 + 2) if want_quarters else 6
         periods = sorted(
             (d for d, doc in corpus.docs.items()
              if doc.company in companies
+             and (not qw or not qw["year"]
+                  or doc.period[:4] == qw["year"])   # 年份切片：该年全粒度
              and (not quarterly or any(doc.period.endswith(sfx)
                                        for sfx in sfxs))),
             key=lambda d: _period_key(corpus.docs[d].period))[-cap:]
