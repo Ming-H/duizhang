@@ -106,8 +106,10 @@ START → understand ──→ route ──metric/compare(llm)──→ 【agent
 **语料分工**：`samples/`（3 家公司 5 份财报，演示与 CI 回归）；
 `data/中际旭创/`（10 docs / 7,873 chunks，**随 git 入库 26MB**——
 真值评估集的承重墙：每题答案都是人工核对过的原文数字，脱离这份
-语料 innolight 集不可复现；P1 将加 CI 冒烟让其常驻承重）；
-`data/corpus/`（全量 1,104 docs，本机自备不入 git）。双语料可同库
+语料 innolight 集不可复现；CI 冒烟常驻承重）；
+`data/贵州茅台/`（10 docs / 6,518 chunks，10MB 随 git 入库——
+2024–2026 与中际旭创同期结构，第二家公司语料就位、真值题待补）；
+`data/corpus/`（全量 1,104 docs，本机自备不入 git）。多语料可同库
 共存（多根摄取），上表 innolight 行即 samples+中际旭创 同库跑出。
 
 **架构比模型更保命**：0.8b 本地小模型的生成质量不足时，verify 闸门

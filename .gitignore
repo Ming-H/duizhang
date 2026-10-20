@@ -7,6 +7,7 @@ duizhang.db
 
 data/*
 !data/中际旭创/
+!data/贵州茅台/
 *.idx.pkl
 duizhang.db-wal
 duizhang.db-shm
