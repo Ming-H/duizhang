@@ -164,14 +164,27 @@ PRAGMA（mmap + 200MB 页缓存）与「两轨轻列、正文延迟取」两个�
 | v0.1 | rank_bm25 纯 Python | 5 文档毫秒级；60 万块单查 **4.9s**（不可用） |
 | v0.2 | 自研倒排 + numpy | 60 万块 9ms；1.8GB 内存；117s 重建 |
 | v0.4 | SQLite FTS5 | 39ms 稳态；0.03GB；启动 0.05s；增量 0.8s |
+| v0.6.x | Agentic RAG（Agent 环 + trend 双闸） | agent 集 llm 双脑 1.00；31+9 真值集全绿 |
+| v0.7 | 封闭世界事实 Agent（四支柱） | 130 测试；七数据集 heuristic 全 1.00；waste_rate=eₖ 代理出口 |
 
 ## 五、扩展路径（按触发条件）
 
+> v0.7 已落地的扩展见 `DESIGN-v0.7-agent.md`：**ReAct 步级观测**
+> （thought/action/obs/gate 四元组 + waste_rate）、**Planner-Executor**
+> （子目标检查点 + 只删不造校验）、**三层记忆**（L0 会话压缩继承 /
+> L1 verify 门控事实台账 / L2 语义资产）、**工具注册表**（search /
+> metrics_table / derive 差分算子）——都在封闭世界契约内（事实只
+> 出自内部 RAG 证据，工具白名单只有内部动作），长程可靠性按
+> P(错误答案) ≤ Σeₖ·gₖ 管理（DESIGN-v0.7 §3）。
+
 - **向量第三路**：bge-small-zh + 第三轨 RRF。触发条件：排行榜证明
-  「词法+字轨」在口语化问题上的增益缺口 > 运维成本
+  「词法+字轨」在口语化问题上的增益缺口 > 运维成本（v0.6 消融为
+  净负贡献，默认关）
 - **rerank 层**：cross-encoder 精排 top-20。触发：retrieval@3 停滞
 - **ES 平移**：多查询方 / 跨机部署时，`fts.search` 是唯一需要替换的函数
 - **跨期对比**：结构化指标抽取 + 时序连接（「2025 vs 2026 毛利率变化」）
+  ——单值跨年题已由 v0.7 multihop 集 + Planner 覆盖，比率类跨期对比待做
+- **runs.jsonl 持久化**：全量问答轨迹落盘（eₖ/gₖ 实测表的数据源）
 
 ## 六、仓库地图
 
@@ -183,11 +196,12 @@ duizhang/
 ├── store.py     四表唯一写入口（事务 + fts rowid 对齐）
 ├── index.py     分词原语 + 瘦身 Corpus（docs 全量，chunk 按需）
 ├── fts.py       双轨 FTS5 检索 + RRF 融合
-├── graph.py     LangGraph 八节点状态机
+├── graph.py     LangGraph 状态机（v0.7：memory_probe/plan 新节点 + ReAct 工具循环）
+├── memory.py    Memory 三层（L0 会话继承 / L1 台账读写 / L2 语义资产）
 ├── answer.py    抽取式生成 + 引用覆盖率对账
 ├── llm.py       可选 LLM 层（OpenAI 兼容，零 key 不加载）
-└── evalx.py     内置评估集三指标
-tests/           19 用例（分块/路由/守卫/纠错环/Store 回归/增量三态）
-evals/           10 题 QA 集（含两道必须拒答的陷阱题）
+└── evalx.py     内置评估七集 + steps 步级观测
+tests/           130 用例（conftest 封网；test_v07.py=v0.7 四支柱回归）
+evals/           七数据集（default/agent/innolight/maotai/quarters/multihop/multiturn）
 docs/            设计文档 ×3 + 本讲解 + 流程动效图（pipeline.html）
 ```

@@ -31,6 +31,21 @@ CREATE TABLE IF NOT EXISTS vecmeta (
   model TEXT PRIMARY KEY);
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_w USING fts5(content_w, tokenize='unicode61');
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_c USING fts5(content_c, tokenize='trigram');
+-- L1 事实台账（v0.7 Phase 3，DESIGN-v0.7 §7.4）：键寻址 (company,
+-- period, metric, caliber)；append-only + supersede（永不物理删除）；
+-- 部分索引只索引活行（superseded_by IS NULL）——死行留存审计轨迹。
+CREATE TABLE IF NOT EXISTS verified_facts (
+  id INTEGER PRIMARY KEY,
+  company TEXT NOT NULL, period TEXT NOT NULL,
+  metric TEXT NOT NULL, caliber TEXT NOT NULL,
+  value_raw TEXT, value_std REAL, unit TEXT, yoy TEXT,
+  citations TEXT NOT NULL,
+  coverage REAL, verdict TEXT NOT NULL, run_id TEXT, created_at TEXT,
+  source_doc_ids TEXT, doc_fps TEXT,
+  superseded_by INTEGER REFERENCES verified_facts(id),
+  supersede_reason TEXT);
+CREATE INDEX IF NOT EXISTS vf_live ON verified_facts(company, period, metric, caliber)
+  WHERE superseded_by IS NULL;
 """
 
 
@@ -151,6 +166,109 @@ class Store:
         row = self.con.execute(
             "SELECT doc_id FROM manifest WHERE path=?", (path,)).fetchone()
         return row[0] if row else None
+
+    # ── L1 事实台账（v0.7 Phase 3）：读不豁免、写有闸，append-only ──
+
+    def _fact_row(self, company: str, period: str, metric: str,
+                  caliber: str) -> dict | None:
+        """活行查询（部分索引命中）。返回 dict 或 None。"""
+        row = self.con.execute(
+            "SELECT id, value_raw, value_std, unit, yoy, citations, coverage,"
+            " verdict, source_doc_ids, doc_fps, created_at FROM verified_facts"
+            " WHERE company=? AND period=? AND metric=? AND caliber=?"
+            " AND superseded_by IS NULL ORDER BY id DESC LIMIT 1",
+            (company, period, metric, caliber)).fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "value_raw": row[1], "value_std": row[2],
+                "unit": row[3], "yoy": row[4],
+                "citations": json.loads(row[5] or "[]"),
+                "coverage": row[6], "verdict": row[7],
+                "source_doc_ids": json.loads(row[8] or "[]"),
+                "doc_fps": json.loads(row[9] or "{}"),
+                "created_at": row[10]}
+
+    def current_fingerprints(self, doc_ids: list[str]) -> dict[str, str]:
+        """doc_id → 当前 manifest 指纹（台账读时校验语料是否被重摄取）。"""
+        if not doc_ids:
+            return {}
+        marks = ",".join("?" * len(doc_ids))
+        return {d: fp for d, fp in self.con.execute(
+            f"SELECT doc_id, fingerprint FROM manifest WHERE doc_id IN ({marks})",
+            doc_ids)}
+
+    def probe_fact(self, company: str, period: str, metric: str,
+                   caliber: str) -> tuple[str, dict | None]:
+        """探针：返回 (状态, 行)。状态 ∈ hit / stale / miss。
+        stale = 源文档被重摄取（指纹漂移）或已不在库——读时失效
+        （公理 6：失效=语料指纹），活行就地 supersede（reason=reingest），
+        视同 miss。"""
+        row = self._fact_row(company, period, metric, caliber)
+        if row is None:
+            return "miss", None
+        fps = self.current_fingerprints(row["source_doc_ids"])
+        ok = all(fps.get(d) == fp for d, fp in row["doc_fps"].items()) \
+            and set(row["source_doc_ids"]) <= set(fps)
+        if not ok:
+            self.supersede_fact(row["id"], "reingest")
+            return "stale", None
+        return "hit", row
+
+    def supersede_fact(self, fact_id: int, reason: str) -> None:
+        with self.con:
+            self.con.execute(
+                "UPDATE verified_facts SET superseded_by=?, supersede_reason=?"
+                " WHERE id=? AND superseded_by IS NULL", (fact_id, reason, fact_id))
+
+    def write_fact(self, fact: dict) -> str:
+        """合并写入（DESIGN-v0.7 §7.5）：返回算子名。
+        noop        同值同指纹 → 不动（幂等重放）
+        insert      无活行 → 新增
+        conflict    异值且无期间推进 → 旧行 supersede(reason=conflict) 后
+                    写新行——两值都有据时保守留新，旧行留痕待人工裁决
+        restated    异值且新行引用了更晚的报告期文档（财报追溯调整的
+                    轻量双时间语义）→ 旧行 supersede(reason=restated) 后写新行
+        """
+        key = (fact["company"], fact["period"], fact["metric"], fact["caliber"])
+        old = self._fact_row(*key)
+        if old is not None:
+            same_val = (old["value_std"] is not None
+                        and fact.get("value_std") is not None
+                        and abs(old["value_std"] - fact["value_std"]) < 0.005)
+            same_fps = old["doc_fps"] == (fact.get("doc_fps") or {})
+            if same_val and same_fps:
+                return "noop"
+            reason = "reingest" if same_val else "conflict"
+            if not same_val:
+                old_max = max((self._doc_period(d) for d in old["source_doc_ids"]),
+                              default="")
+                new_max = max((self._doc_period(d) for d in fact["source_doc_ids"]),
+                              default="")
+                if new_max > old_max:
+                    reason = "restated"
+            self.supersede_fact(old["id"], reason)
+        cols = ("company, period, metric, caliber, value_raw, value_std, unit,"
+                " yoy, citations, coverage, verdict, run_id, created_at,"
+                " source_doc_ids, doc_fps")
+        vals = (fact["company"], fact["period"], fact["metric"], fact["caliber"],
+                fact.get("value_raw"), fact.get("value_std"), fact.get("unit"),
+                fact.get("yoy"), json.dumps(fact.get("citations") or [],
+                                            ensure_ascii=False),
+                fact.get("coverage"), fact.get("verdict", "pass"),
+                fact.get("run_id", ""), fact.get("created_at", ""),
+                json.dumps(fact.get("source_doc_ids") or [], ensure_ascii=False),
+                json.dumps(fact.get("doc_fps") or {}, ensure_ascii=False))
+        with self.con:
+            self.con.execute(
+                f"INSERT INTO verified_facts ({cols}) VALUES ({','.join('?' * 15)})",
+                vals)
+        op = "insert" if old is None else reason
+        return op
+
+    def _doc_period(self, doc_id: str) -> str:
+        row = self.con.execute(
+            "SELECT period FROM docs WHERE doc_id=?", (doc_id,)).fetchone()
+        return row[0] if row else ""
 
     def analyze(self) -> None:
         """刷新查询计划器统计（sqlite_stat1）。全量/大增量摄取后调用一次，

@@ -36,6 +36,7 @@ class Corpus:
 
     def __init__(self) -> None:
         self.docs: dict[str, Doc] = {}
+        self.db_path: str = ""
         self._con: sqlite3.Connection | None = None
 
     # ── 加载 ──
@@ -43,6 +44,7 @@ class Corpus:
     @classmethod
     def load(cls, db_path: str | Path) -> "Corpus":
         corp = cls()
+        corp.db_path = str(db_path)   # v0.7：L1 台账读写要按路径开 Store
         corp._con = sqlite3.connect(str(db_path))
         for row in corp._con.execute(
                 "SELECT doc_id, company, period, kind, source, n_pages FROM docs"):

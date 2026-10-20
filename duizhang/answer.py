@@ -52,11 +52,15 @@ def _content_tokens(toks, extra_meta: tuple[str, ...] = (),
 # 「者权益（元）…」=归属于上市公司股东的净资产、「常性损益的净利
 # 润」=扣除非经常性损益的净利润，标签「扣除非经|常性损益」被切走）。
 # 不修复则 query 完整词与证据零重叠（真值行落选），口径镜像也无从
-# 匹配（0.8b 看到无标签残行，拿归母数答扣非题）。graph.trend_skeleton
-# 的 pick() 与 graph.generate 的 LLM 证据组装维护同族映射，三处同步
+# 匹配（小模型看到无标签残行，拿归母数答扣非题）。graph.trend_skeleton
+# 的 pick() 与 graph.generate 的 LLM 证据组装维护同族映射，三处同步。
+# v0.7 追加「利润 」前缀（三年表标签「归属于上市公司股|东股东的净」
+# 被整段切走、行首只剩「利润」+数值——2024FY 归母行实测）：
+# 「利润总额/利润分配」不匹配（尾随空格锚定），只救裸「利润 862.28…」
 SPLIT_FIX = (("润（元）", "净利润"), ("入（元）", "营业收入"),
              ("额（元）", "总资产额"), ("者权益（元）", "归属于上市公司股东的净资产"),
-             ("常性损益的净利润", "扣除非经常性损益的净利润"))
+             ("常性损益的净利润", "扣除非经常性损益的净利润"),
+             ("利润 ", "归属于上市公司股东的净利润"))
 
 
 def split_fix(text: str) -> str:
@@ -98,8 +102,12 @@ def extractive_answer(state: GraphState, hits: list[Retrieved],
             overlap = len(q & stoks)
             if overlap == 0:
                 continue          # 零重叠句只靠 num_notes 加分混进答案（实测净资产句）
-            # 数字句优先（财报问答大多数时候在问数字）
-            has_num = bool(re.search(r"\d", s)) or bool(h.chunk.num_notes)
+            # 数字句优先（财报问答大多数时候在问数字）。真数字才算：
+            # 条目序号（「2.终止经营净利润」「1.归属于…」）也是 \d，
+            # 无值表头句凭它拿 1.4× 加权混进证据与引用（茅台 p31
+            # 实测）——要求 ≥2 位数字或小数/千分位形态
+            has_num = bool(re.search(r"\d[\d,]*\.?\d", s)) or \
+                bool(h.chunk.num_notes)
             score = overlap * (1.4 if has_num else 1.0) + (0.2 if h.chunk.num_notes else 0.0)
             # 数字问句（「多少」）下，无数字句强降权：表头行（「归属于
             # 上市公司股东的净利润（元）」）词面完美匹配扩展词却无值，
@@ -135,6 +143,12 @@ def extractive_answer(state: GraphState, hits: list[Retrieved],
             #    收入族映射的三重叠（实测 4.2 分顶掉总资产行 1.6 分）
             if ("总资产" in q_raw and "收入" not in q_raw and "营收" not in q_raw
                     and ("营业收入" in s or "总收入" in s) and "总资产" not in s):
+                score *= 0.3
+            # ⑥ 问营业收入/营收：纯总收入句是总口径（D23 对称降权——
+            # 营业收入⊄营业总收入，纯「一、营业总收入 92,278…」句不含
+            # 营业收入，词面重叠会顶掉子口径真值行）
+            if (("营业收入" in q_raw or "营收" in q_raw) and "总收入" not in q_raw
+                    and "总收入" in s and "营业收入" not in s):
                 score *= 0.3
             if wants_reason and _REASON_PAT.search(s):
                 score += 1.5

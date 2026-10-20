@@ -1,10 +1,20 @@
-"""评估：双数据集（default 单跳 / agent 多跳）+ 三指标 + 跑分表。
+"""评估：多数据集 + 三指标 + 跑分表。
 
 指标：
 · retrieval@3 —— 检索 top3 命中块是否来自期望文档（检索层的硬指标；
   对比题用 expect_docs 列表：每家都要在场）
 · answer hit   —— 答案是否包含期望关键词（生成层的软指标）
 · refusal      —— 应拒答问题是否真的拒了（对账纪律）
+
+v0.7 新增：
+· steps_summary —— ReAct 步级观汇总（calls/new/dup/empty/waste_rate）：
+  dup/empty 占比 = 步级浪费率，eₖ（步错率）的可测代理（DESIGN-v0.7
+  §3 度量先行；gₖ 闸门逃生率的出口 = verify verdict 分布，已由
+  faithfulness_pass 承担）
+· multiturn 数据集 —— 轮间带 L0 会话记忆的连续问答（每 case 是一串
+  turns，判定按轮）
+· eval 默认隔离 L1 台账（DZ_MEMORY=off）——防止把检索能力测成记忆
+  命中；DZ_EVAL_MEMORY=on 显式放开（记忆专项评估用）
 
 逐题 ✓ 口径与汇总一致：非拒答题必须「关键词命中 且 检索命中」
 （judge()），否则逐题打勾数与 retrieval@3 / answer_hit 对不上。
@@ -13,13 +23,17 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 DATASET_DIR = Path(__file__).resolve().parents[1] / "evals"
 DATASETS = {"default": DATASET_DIR / "dataset.json",
             "agent": DATASET_DIR / "dataset-agent.json",
             "innolight": DATASET_DIR / "dataset-innolight.json",
-            "maotai": DATASET_DIR / "dataset-maotai.json"}
+            "maotai": DATASET_DIR / "dataset-maotai.json",
+            "multihop": DATASET_DIR / "dataset-multihop.json",
+            "multiturn": DATASET_DIR / "dataset-multiturn.json",
+            "quarters": DATASET_DIR / "dataset-quarters.json"}
 
 
 def load_dataset(name: str = "default") -> list[dict]:
@@ -82,13 +96,7 @@ def chunk_pr(case: dict, st: dict, k: int = 8) -> dict | None:
 
 def summarize(rows: list[dict], states: list[dict], mode: str, dataset: str,
               prs: list[dict] | None = None) -> dict:
-    """汇总三指标 + faithfulness + chunk 级 P/R（纯函数，便于复用）。
-
-    faithfulness 两个口径：非拒答题中 verify pass 占比（闸门放行的
-    生成占比；degraded 已被重写为抽取式，天然可回溯）；平均引用覆盖率
-    （GraphState.coverage，v0.6.3 起写入）。chunk P/R 的 per-case 值由
-    run_eval 用原题关键词算好传入（judge 行不带关键词）。
-    """
+    """汇总三指标 + faithfulness + chunk 级 P/R + 步级浪费率（纯函数）。"""
     answered = [(r, s) for r, s in zip(rows, states)
                 if not r["expect_refused"]]
     n_ans = max(1, len(answered))
@@ -96,6 +104,18 @@ def summarize(rows: list[dict], states: list[dict], mode: str, dataset: str,
     n_ref = max(1, sum(1 for r in rows if r["expect_refused"]))
     covs = [s.get("coverage") for _, s in answered
             if s.get("coverage") is not None]
+    # ReAct 步级观测汇总（v0.7 Phase 1）：waste_rate = (dup+empty)/calls
+    # ——dup=幂等缓存拦下的重复动作，empty=零观察动作。eₖ 的可测代理。
+    calls = sum(len(s.get("agent_steps") or []) for _, s in answered)
+    gates = [stp.get("gate") for _, s in answered
+             for stp in (s.get("agent_steps") or [])
+             if stp.get("gate") in ("new", "dup", "empty")]
+    n_dup = gates.count("dup")
+    n_empty = gates.count("empty")
+    steps_summary = {"calls": calls, "new": gates.count("new"),
+                     "dup": n_dup, "empty": n_empty,
+                     "waste_rate": round((n_dup + n_empty) / len(gates), 3)
+                     if gates else 0.0}
     return dict(
         mode=mode,
         dataset=dataset,
@@ -107,6 +127,7 @@ def summarize(rows: list[dict], states: list[dict], mode: str, dataset: str,
         faithfulness_pass=round(
             sum(1 for _, s in answered if s.get("verdict") == "pass") / n_ans, 3),
         mean_coverage=round(sum(covs) / len(covs), 3) if covs else 0.0,
+        steps=steps_summary,
         **{"chunk_p@8": round(sum(p["p"] for p in prs) / len(prs), 3) if prs else 0.0,
            "chunk_r@8": round(sum(p["r"] for p in prs) / len(prs), 3) if prs else 0.0},
     )
@@ -115,34 +136,66 @@ def summarize(rows: list[dict], states: list[dict], mode: str, dataset: str,
 def run_eval(corpus, mode: str = "auto", verbose: bool = True,
              dataset: str = "default") -> dict:
     from duizhang.graph import build_graph
+    from duizhang.memory import append_turn, summarize_turn
     from duizhang.schemas import new_state
 
-    app = build_graph(corpus)      # 图只编译一次，逐题 invoke
-    rows, states, prs = [], [], []
-    cases = load_dataset(dataset)
-    for c in cases:
-        st = app.invoke(new_state(c["q"], mode))
-        row = judge(c, st)
-        rows.append(row)
-        states.append(st)
-        pr = chunk_pr(c, st)
-        if pr:
-            prs.append(pr)
-        if verbose:
-            flag = "✓" if row["ok"] else "✗"
-            print(f"  {flag} {c['q'][:30]:<32} top1={row['top1']:<16} "
-                  f"kw={'Y' if row['kw_hit'] else 'N'} "
-                  f"doc={'Y' if row['doc_hit'] else 'N'} "
-                  f"refused={'Y' if row['refused'] else 'N'}")
+    # eval 默认隔离 L1 台账（v0.7 Phase 3）：DZ_EVAL_MEMORY=on 才放开
+    # ——记忆命中的答案检索痕迹为空，混跑会把检索指标测虚高
+    prev_env = os.environ.get("DZ_MEMORY")
+    if os.environ.get("DZ_EVAL_MEMORY", "") != "on":
+        os.environ["DZ_MEMORY"] = "off"
 
-    summary = summarize(rows, states, mode, dataset, prs)
-    if verbose:
-        print(f"\n  mode={summary['mode']} dataset={dataset}"
-              f"  retrieval@3={summary['retrieval_top3']}"
-              f"  answer_hit={summary['answer_hit']}"
-              f"  refusal={summary['refusal']}"
-              f"  faithfulness(pass/cov)={summary['faithfulness_pass']}"
-              f"/{summary['mean_coverage']}"
-              f"  chunk P/R@8={summary['chunk_p@8']}/{summary['chunk_r@8']}")
-    # rows 随行（P1 观测性）：--json 脚本化修前/修后四格表的数据面
-    return {**summary, "rows": rows}
+    try:
+        app = build_graph(corpus)      # 图只编译一次，逐题 invoke
+        rows, states, prs = [], [], []
+        cases = load_dataset(dataset)
+        for c in cases:
+            if "turns" in c:           # multiturn：轮间带 L0 会话记忆
+                history: list[dict] = []
+                for t in c["turns"]:
+                    st = app.invoke(new_state(t["q"], mode, history))
+                    row = judge(t, st)
+                    rows.append(row)
+                    states.append(st)
+                    pr = chunk_pr(t, st)
+                    if pr:
+                        prs.append(pr)
+                    if verbose:
+                        flag = "✓" if row["ok"] else "✗"
+                        print(f"  {flag} {t['q'][:30]:<32} top1={row['top1']:<16} "
+                              f"kw={'Y' if row['kw_hit'] else 'N'} "
+                              f"doc={'Y' if row['doc_hit'] else 'N'} "
+                              f"refused={'Y' if row['refused'] else 'N'}")
+                    append_turn(history, summarize_turn(t["q"], st))
+                continue
+            st = app.invoke(new_state(c["q"], mode))
+            row = judge(c, st)
+            rows.append(row)
+            states.append(st)
+            pr = chunk_pr(c, st)
+            if pr:
+                prs.append(pr)
+            if verbose:
+                flag = "✓" if row["ok"] else "✗"
+                print(f"  {flag} {c['q'][:30]:<32} top1={row['top1']:<16} "
+                      f"kw={'Y' if row['kw_hit'] else 'N'} "
+                      f"doc={'Y' if row['doc_hit'] else 'N'} "
+                      f"refused={'Y' if row['refused'] else 'N'}")
+
+        summary = summarize(rows, states, mode, dataset, prs)
+        if verbose:
+            print(f"\n  mode={summary['mode']} dataset={dataset}"
+                  f"  retrieval@3={summary['retrieval_top3']}"
+                  f"  answer_hit={summary['answer_hit']}"
+                  f"  refusal={summary['refusal']}"
+                  f"  faithfulness(pass/cov)={summary['faithfulness_pass']}"
+                  f"/{summary['mean_coverage']}"
+                  f"  chunk P/R@8={summary['chunk_p@8']}/{summary['chunk_r@8']}"
+                  f"  steps={summary['steps']}")
+        # rows 随行（P1 观测性）：--json 脚本化修前/修后四格表的数据面
+        return {**summary, "rows": rows}
+    finally:
+        if prev_env is None:
+            os.environ.pop("DZ_MEMORY", None)
+        else:
+            os.environ["DZ_MEMORY"] = prev_env

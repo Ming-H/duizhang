@@ -90,10 +90,24 @@ class GraphState(TypedDict, total=False):
     verdict: Literal["pass", "degraded", "refused"]
     coverage: float                     # 引用覆盖率（faithfulness 报告指标用）
     trace: Annotated[list[str], operator.add]   # 执行轨迹（append 语义）
+    # ── v0.7 Agent 化新增（DESIGN-v0.7 §4）────────────────
+    history: list[dict]                 # L0 会话记忆：近 3 轮全量 + 更早结构化摘要
+    # ReAct 步级观测（Phase 1）：agent 环每步四元组
+    # {i, thought, action, obs, obs_doc, gate, ms}，gate ∈ new/dup/empty
+    agent_steps: list[dict]
+    # Planner-Executor（Phase 2）：子目标账本，三态 pending/done/failed
+    subgoals: list[dict]
+    plan_gaps: list[str]                # 已声明缺口（部分答案红线：不静默吞掉）
+    derived: list[dict]                 # 派生值登记 {label, value, a, b, unit}（verify 重算 ±0.01）
+    # Memory（Phase 3）：命中台账时 True（answer 已内联过 verify，出口跳过）
+    memory_hit: bool
+    fact_key: dict                      # L1 键（探针/写侧/L0 轮摘要共用）
+    fact_rows: list[dict]               # 结构化事实行（trend 骨架行，L1 写入源）
 
 
-def new_state(query: str, mode: str = "auto") -> GraphState:
-    """mode=auto：有 key 走 llm（LLM 是大脑），无 key 走 heuristic（兜底）。"""
+def new_state(query: str, mode: str = "auto", history: list[dict] | None = None) -> GraphState:
+    """mode=auto：有 key 走 llm（LLM 是大脑），无 key 走 heuristic（兜底）。
+    history：L0 会话记忆（cli chat 传入；单发 ask 不带）。"""
     if mode == "auto":
         from duizhang import llm
         mode = "llm" if llm.llm_enabled() else "heuristic"
@@ -106,5 +120,6 @@ def new_state(query: str, mode: str = "auto") -> GraphState:
         mode=mode,
         retries=0,
         rewritten=False,
+        history=history or [],
         trace=trace,
     )

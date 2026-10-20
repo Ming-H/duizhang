@@ -162,7 +162,8 @@ def cmd_ask(args):
     if args.json:                         # 机器态：整态 JSON（脚本消费）
         keep = ("query", "mode", "route", "relevance", "verdict", "coverage",
                 "answer", "citations", "trace", "timing", "elapsed",
-                "effective_query", "understanding")
+                "effective_query", "understanding",
+                "agent_steps", "subgoals", "derived", "memory_hit")
         print(_json.dumps({k: st.get(k) for k in keep},
                           ensure_ascii=False, indent=2, default=str))
         return
@@ -180,6 +181,13 @@ def cmd_ask(args):
             else f"[{st.get('verdict')}/{st.get('coverage')}] "
         print(f"{head}trace: {' → '.join(steps)}  总耗时 {st.get('elapsed')}s",
               file=sys.stderr)
+        # ReAct 步级观测（v0.7 Phase 1）：-v 逐行打印 Thought/Action/
+        # Observation/gate 四元组——步级闸门与浪费动作当场可见
+        for sp in st.get("agent_steps") or []:
+            print(f"  agent[{sp.get('i')}] thought={sp.get('thought', '')[:60]!r} "
+                  f"action={sp.get('action')} obs={sp.get('obs')}"
+                  f"({sp.get('obs_doc')}) gate={sp.get('gate')}",
+                  file=sys.stderr)
 
 
 def cmd_docs(args):
@@ -188,6 +196,48 @@ def cmd_docs(args):
     for d in corp.docs.values():
         print(f"{d.doc_id:<26} {d.kind:<8} {d.n_pages:>3}页  {d.source}")
     print(f"\n共 {n_docs} docs / {n_chunks} chunks")
+
+
+def cmd_chat(args):
+    """L0 会话记忆 REPL（v0.7 Phase 3）：多轮追问共享上下文——近 3 轮
+    全量、更早压缩为结构化轮摘要（只继承 understanding 字段与指标词，
+    永不继承自由文本）。/hist 看记忆窗口；exit/quit/Ctrl-D 退出。"""
+    import sys
+
+    from duizhang.graph import ask
+    from duizhang.memory import append_turn, summarize_turn
+    corp = _corpus_from_db()
+    history: list[dict] = []
+    print(f"对账 chat（{len(corp.docs)} docs，L0 记忆开；exit 退出）")
+    while True:
+        try:
+            q = input("\n你> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not q or q in ("exit", "quit", "q"):
+            return
+        if q == "/hist":
+            for i, t in enumerate(history):
+                u = t.get("u") or {}
+                body = t.get("a") or "（已压缩为结构化摘要）"
+                print(f"  [{i}] {t.get('q', '')[:40]} → {u.get('intent')}/"
+                      f"{u.get('companies')}/{u.get('period')} | {body[:60]}")
+            continue
+        try:
+            st = ask(corp, q, mode=args.mode, history=history)
+        except Exception as e:
+            print(f"✗ {type(e).__name__}: {e}", file=sys.stderr)
+            continue
+        print(f"\n对账> {st.get('answer')}")
+        if st.get("citations"):
+            print(f"引用: {', '.join(st['citations'])}")
+        if args.verbose or st.get("verdict") != "pass":
+            import sys as _sys
+            print(f"[{st.get('verdict')}/{st.get('coverage')}] "
+                  f"trace: {' → '.join(st.get('trace', []))} "
+                  f"{st.get('elapsed')}s", file=_sys.stderr)
+        append_turn(history, summarize_turn(q, st))
 
 
 def cmd_eval(args):
@@ -222,9 +272,14 @@ def main():
     p.add_argument("--mode", default="auto", choices=["auto", "llm", "heuristic"],
                    help="auto=有 key 走 llm 无 key 走 heuristic（默认）")
     p.add_argument("-v", "--verbose", action="store_true",
-                   help="诊断态：trace 每节点带耗时（stderr）")
+                   help="诊断态：trace 每节点带耗时 + ReAct 步级四元组（stderr）")
     p.add_argument("--json", action="store_true", help="机器态：整态 JSON 输出")
     p.set_defaults(fn=cmd_ask)
+
+    p = sub.add_parser("chat", help="多轮对话（L0 会话记忆：追问继承公司/期间/指标）")
+    p.add_argument("--mode", default="auto", choices=["auto", "llm", "heuristic"])
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.set_defaults(fn=cmd_chat)
 
     p = sub.add_parser("docs", help="列出已入库文档")
     p.set_defaults(fn=cmd_docs)
@@ -234,10 +289,13 @@ def main():
     p.add_argument("--json", action="store_true",
                    help="机器态：summary+行级 rows 的 JSON（修前/修后对比脚本用）")
     p.add_argument("--dataset", default="default",
-                   choices=["default", "agent", "innolight", "maotai"],
+                   choices=["default", "agent", "innolight", "maotai",
+                            "multihop", "multiturn", "quarters"],
                    help="default=单跳 10 题（CI 回归）；agent=多跳对比 8 题；"
                         "innolight=中际旭创真值 31 题（事实/趋势/陷阱/鲁棒）；"
-                        "maotai=贵州茅台真值 9 题（简称/口径/断词泛化）")
+                        "maotai=贵州茅台真值 9 题（简称/口径/断词泛化）；"
+                        "multihop=Planner 多跳 8 题；multiturn=会话记忆 10 轮；"
+                        "quarters=单季差分（派生值）")
     p.set_defaults(fn=cmd_eval)
 
     args = ap.parse_args()
