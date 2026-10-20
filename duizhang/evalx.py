@@ -101,7 +101,9 @@ def summarize(rows: list[dict], states: list[dict], mode: str, dataset: str,
                 if not r["expect_refused"]]
     n_ans = max(1, len(answered))
     prs = prs or []
-    n_ref = max(1, sum(1 for r in rows if r["expect_refused"]))
+    # 无陷阱题的数据集（如 multiturn 接力链）refusal 口径不适用 →
+    # None（打印 N/A、JSON null）——打 0.0 会被未来 CI 门槛误判
+    n_ref = sum(1 for r in rows if r["expect_refused"])
     covs = [s.get("coverage") for _, s in answered
             if s.get("coverage") is not None]
     # ReAct 步级观测汇总（v0.7 Phase 1）：waste_rate = (dup+empty)/calls
@@ -122,8 +124,9 @@ def summarize(rows: list[dict], states: list[dict], mode: str, dataset: str,
         cases=len(rows),
         retrieval_top3=round(sum(r["doc_hit"] for r, _ in answered) / n_ans, 3),
         answer_hit=round(sum(r["kw_hit"] for r, _ in answered) / n_ans, 3),
-        refusal=round(sum(1 for r in rows
-                          if r["expect_refused"] and r["refused"]) / n_ref, 3),
+        refusal=(round(sum(1 for r in rows
+                           if r["expect_refused"] and r["refused"]) / n_ref, 3)
+                 if n_ref else None),
         faithfulness_pass=round(
             sum(1 for _, s in answered if s.get("verdict") == "pass") / n_ans, 3),
         mean_coverage=round(sum(covs) / len(covs), 3) if covs else 0.0,
@@ -187,7 +190,7 @@ def run_eval(corpus, mode: str = "auto", verbose: bool = True,
             print(f"\n  mode={summary['mode']} dataset={dataset}"
                   f"  retrieval@3={summary['retrieval_top3']}"
                   f"  answer_hit={summary['answer_hit']}"
-                  f"  refusal={summary['refusal']}"
+                  f"  refusal={summary['refusal'] if summary['refusal'] is not None else 'N/A'}"
                   f"  faithfulness(pass/cov)={summary['faithfulness_pass']}"
                   f"/{summary['mean_coverage']}"
                   f"  chunk P/R@8={summary['chunk_p@8']}/{summary['chunk_r@8']}"

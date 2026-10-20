@@ -32,12 +32,17 @@ jobs:
           python -m duizhang.cli ask "欧科亿 2026 年半年度预计净利润多少"
           python -m duizhang.cli eval
 
-      # innolight 真值冒烟：随 git 入库的 26MB 中际旭创语料（10 docs /
-      # 7,873 chunks）从死重变承重墙——31 题真值（事实/趋势/陷阱/鲁棒）
-      # 每道都是人工核对过的原文数字。干净库全流程本地实测 ~2:40。
-      - name: 冒烟：innolight 真值集（data/中际旭创 31 题）
+      # 真值三集冒烟：随 git 入库的双语料（中际旭创 26MB + 贵州茅台
+      # 10MB）+ samples 同库——47 题真值（innolight 31 事实/趋势/陷阱/
+      # 鲁棒 + quarters 8 单季差分 + multihop 8 跨年/三公司）每次 push
+      # 都跑，每题都是人工核对过的原文数字。
+      - name: 冒烟：真值三集（innolight 31 + quarters 8 + multihop 8）
         env:
-          DZ_DB: /tmp/innolight.db
+          DZ_DB: /tmp/truth.db
         run: |
+          python -m duizhang.cli ingest samples/
           python -m duizhang.cli ingest data/中际旭创
-          python -m duizhang.cli eval --dataset innolight
+          python -m duizhang.cli ingest data/贵州茅台
+          python -m duizhang.cli eval --mode heuristic --dataset innolight
+          python -m duizhang.cli eval --mode heuristic --dataset quarters
+          python -m duizhang.cli eval --mode heuristic --dataset multihop

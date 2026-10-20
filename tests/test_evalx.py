@@ -54,3 +54,8 @@ def test_summarize_reports_faithfulness_and_chunk_pr():
     assert s["faithfulness_pass"] == pytest.approx(1.0)   # 非拒答 1/1 pass
     assert s["mean_coverage"] == pytest.approx(0.9)
     assert "chunk_p@8" in s and "chunk_r@8" in s
+    assert s["refusal"] == 1.0                            # 陷阱题 1/1 拒
+    # 无陷阱题（multiturn 类接力集）：refusal 口径不适用 → None（N/A），
+    # 不打 0.0（会被未来 CI 门槛误判）
+    s2 = summarize([rows[0]], [states[0]], mode="heuristic", dataset="multiturn")
+    assert s2["refusal"] is None
