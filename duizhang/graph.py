@@ -1207,7 +1207,22 @@ def build_graph(corpus: Corpus):
 
 
 def ask(corpus: Corpus, query: str, mode: str = "auto") -> GraphState:
-    """一条命令问答：建图 → invoke。"""
+    """一条命令问答：建图 → stream(values) 逐节点计时（P1 观测性：
+    -v/--json 的 trace 每节点带耗时）。"""
     app = build_graph(corpus)
+    import time
+
     from duizhang.schemas import new_state
-    return app.invoke(new_state(query, mode))
+    st: GraphState | None = None
+    marks: list[float] = []
+    t0 = time.perf_counter()
+    for snap in app.stream(new_state(query, mode), stream_mode="values"):
+        st = snap
+        marks.append(time.perf_counter())
+    if st is None:                        # stream 不可用 → invoke 兜底
+        st = app.invoke(new_state(query, mode))
+    if len(marks) >= 2:
+        st["timing"] = [round((marks[i] - marks[i - 1]) * 1000)
+                        for i in range(1, len(marks))]
+    st["elapsed"] = round(time.perf_counter() - t0, 2)
+    return st

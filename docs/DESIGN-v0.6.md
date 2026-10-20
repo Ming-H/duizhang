@@ -483,3 +483,11 @@ pass。修：`caliber_mismatch` 问句点名口径（扣非/总收入/净资产/
 innolight llm 从基线 0.852→0.963；残余 1 题为每股收益（§9 样本 C）。
 测试 93 全绿（+8：简称归一/行级抽取/同值回退/散文回退/口径闸/
 分层证据/配对降权/窗口扩容），ruff 干净。
+
+### P1 观测性三档（同日）
+
+`ask` 默认**产品态**（答案+引用；verdict≠pass 才把 trace 亮到
+stderr，pass 时静默）；`-v` **诊断态**（trace 每节点带耗时——
+`graph.ask` 改 stream(values) 逐步计时，实测瓶颈一眼可见：jieba
+冷启动 358ms 占了大头）；`--json` **机器态**（整态 JSON）。
+`eval --json` 输出 summary+行级 rows——修前/修后四格表可直接脚本化。

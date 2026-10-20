@@ -18,6 +18,9 @@ python -m duizhang.cli ingest samples/  # incremental ingest (fingerprint diff; 
 python -m duizhang.cli ingest samples/ --watch   # poll mode: resync every 60s
 python -m duizhang.cli ask "欧科亿 2026 年半年度预计净利润多少"
 python -m duizhang.cli ask "对比欧科亿和海伦哲 2026 一季度谁赚得多"   # compare → decompose
+python -m duizhang.cli ask "…" -v          # 诊断态：trace 每节点带耗时（stderr）
+python -m duizhang.cli ask "…" --json      # 机器态：整态 JSON
+python -m duizhang.cli eval --json         # 机器态：summary+行级 rows（对比脚本用）
 python -m duizhang.cli eval                          # default dataset (10 单跳; CI regression)
 python -m duizhang.cli eval --mode llm --dataset agent     # agent dataset (multi-hop; local 0.8b ok)
 python -m duizhang.cli eval --dataset innolight      # 中际旭创真值 31 题（事实/趋势/陷阱/鲁棒；CI 冒烟）

@@ -153,16 +153,33 @@ def cmd_embed(args):
 
 
 def cmd_ask(args):
+    import json as _json
+    import sys
+
     from duizhang.graph import ask
     corp = _corpus_from_db()
     st = ask(corp, args.query, mode=args.mode)
+    if args.json:                         # 机器态：整态 JSON（脚本消费）
+        keep = ("query", "mode", "route", "relevance", "verdict", "coverage",
+                "answer", "citations", "trace", "timing", "elapsed",
+                "effective_query", "understanding")
+        print(_json.dumps({k: st.get(k) for k in keep},
+                          ensure_ascii=False, indent=2, default=str))
+        return
+    # 产品态：答案+引用；verdict≠pass 才亮诊断（stderr），-v 全量诊断
     print(f"\nQ: {args.query}")
-    print(f"[route={st.get('route')} | relevance={st.get('relevance')} "
-          f"| verdict={st.get('verdict')}]")
     print(f"A: {st.get('answer')}")
     if st.get("citations"):
         print(f"引用: {', '.join(st['citations'])}")
-    print(f"trace: {' → '.join(st.get('trace', []))}")
+    if args.verbose or st.get("verdict") != "pass":
+        tr = st.get("trace", [])
+        tm = list(st.get("timing") or [])
+        steps = [f"{n}({tm[i]}ms)" if i < len(tm) else n
+                 for i, n in enumerate(tr)]
+        head = "" if st.get("verdict") == "pass" \
+            else f"[{st.get('verdict')}/{st.get('coverage')}] "
+        print(f"{head}trace: {' → '.join(steps)}  总耗时 {st.get('elapsed')}s",
+              file=sys.stderr)
 
 
 def cmd_docs(args):
@@ -176,7 +193,11 @@ def cmd_docs(args):
 def cmd_eval(args):
     from duizhang.evalx import run_eval
     corp = _corpus_from_db()
-    run_eval(corp, mode=args.mode, dataset=args.dataset)
+    summary = run_eval(corp, mode=args.mode, dataset=args.dataset,
+                       verbose=not args.json)
+    if args.json:                         # 机器态：summary+行级 rows
+        import json as _json
+        print(_json.dumps(summary, ensure_ascii=False, default=str))
 
 
 def main():
@@ -200,6 +221,9 @@ def main():
     p.add_argument("query")
     p.add_argument("--mode", default="auto", choices=["auto", "llm", "heuristic"],
                    help="auto=有 key 走 llm 无 key 走 heuristic（默认）")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="诊断态：trace 每节点带耗时（stderr）")
+    p.add_argument("--json", action="store_true", help="机器态：整态 JSON 输出")
     p.set_defaults(fn=cmd_ask)
 
     p = sub.add_parser("docs", help="列出已入库文档")
@@ -207,6 +231,8 @@ def main():
 
     p = sub.add_parser("eval", help="跑内置评估集（agent 集含多跳对比题）")
     p.add_argument("--mode", default="auto", choices=["auto", "llm", "heuristic"])
+    p.add_argument("--json", action="store_true",
+                   help="机器态：summary+行级 rows 的 JSON（修前/修后对比脚本用）")
     p.add_argument("--dataset", default="default",
                    choices=["default", "agent", "innolight", "maotai"],
                    help="default=单跳 10 题（CI 回归）；agent=多跳对比 8 题；"

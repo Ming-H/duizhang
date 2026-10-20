@@ -144,4 +144,5 @@ def run_eval(corpus, mode: str = "auto", verbose: bool = True,
               f"  faithfulness(pass/cov)={summary['faithfulness_pass']}"
               f"/{summary['mean_coverage']}"
               f"  chunk P/R@8={summary['chunk_p@8']}/{summary['chunk_r@8']}")
-    return summary
+    # rows 随行（P1 观测性）：--json 脚本化修前/修后四格表的数据面
+    return {**summary, "rows": rows}
