@@ -109,9 +109,12 @@ def _use_anthropic() -> bool:
 @lru_cache(maxsize=1)
 def _client():
     from openai import OpenAI  # 延迟导入：本地/无 key 模式不要求安装
+    # v0.6.8 延迟治理：远端尾延迟实测 20s+（zhipu 偶发慢响应），无超时
+    # 会把单问拖到 30s+；SDK 层 60s 超时 + 1 次重试砍长尾
     return OpenAI(
         api_key=os.environ.get("DZ_LLM_API_KEY", "local"),
         base_url=_base_url(),
+        timeout=60.0, max_retries=1,
     )
 
 

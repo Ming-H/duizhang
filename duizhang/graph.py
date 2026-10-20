@@ -2357,5 +2357,11 @@ def ask(corpus: Corpus, query: str, mode: str = "auto",
     if len(marks) >= 2:
         st["timing"] = [round((marks[i] - marks[i - 1]) * 1000)
                         for i in range(1, len(marks))]
+    # trace 显示修复（v0.6.8）：stream(values) 快照携带输入态 trace 与
+    # 节点追加段偶发拼接出双份头（start→…→start），LLM 调用无浪费
+    # （understand×1/叙述×1/裁判×1 全必要）——展示前去重
+    tr = st.get("trace") or []
+    if "start" in tr[1:]:
+        st["trace"] = tr[:tr.index("start", 1)] + tr[tr.index("start", 1) + 1:]
     st["elapsed"] = round(time.perf_counter() - t0, 2)
     return st
