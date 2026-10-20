@@ -12,3 +12,5 @@ data/*
 duizhang.db-wal
 duizhang.db-shm
 .env
+
+test_reports/
