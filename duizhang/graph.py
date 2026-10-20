@@ -1425,10 +1425,20 @@ def make_nodes(corpus: Corpus):
                                 narr_trace.append("selfcheck:repair(1)")
                         else:
                             narr_trace.append("selfcheck:pass")
-            body = skeleton
+            # 产品态呈现（v0.6.8）：结论段 + 紧凑表 + 行内引用——算式/
+            # 双引用展开/派生声明/免责属审计信息，进 state['trend_audit']
+            # （-v stderr / --json 展开）；verify 对产品态正文照常全量跑
+            def _compact(line: str) -> str:
+                line = re.sub(r"（= [^）]*，原文未直接披露）", "", line)
+                return (line.replace("（单季·派生，", "（派生，")
+                            .replace("（单季·派生）", "（派生）")
+                            .replace("（单季）", ""))
+            compact = "\n".join(_compact(x) for x in skeleton.splitlines())
+            body = compact
             if analysis:
-                body = f"{body}\n\n{'分析' if deep else '归纳'}：{analysis}"
-            body += "\n（以上为财报事实梳理，不构成投资建议）"
+                body = f"{'分析' if deep else '归纳'}：{analysis}\n\n{body}"
+            state["trend_audit"] = (skeleton + "\n（以上为财报事实梳理，"
+                                    "不构成投资建议）")
             # 引用收窄：列表 = 答案文本里实际出现的引用——此前 cite 全部
             # hits（含骨架没采用行的期间/页），引用虚胖且不可回溯到答案
             cited = list(dict.fromkeys(re.findall(r"\[[^\]]+\]", body)))

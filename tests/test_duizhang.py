@@ -751,7 +751,7 @@ def test_trend_skeleton_mode_independent():
                                      "companies": ["中际旭创"],
                                      "period": "", "reason": "r"}})
     assert "中际旭创_2025Q1" in st["answer"]          # 骨架在场
-    assert "不构成投资建议" in st["answer"]
+    assert "不构成投资建议" in st["trend_audit"]   # v0.6.8 审计层
 
 
 def test_two_digit_year_parsing():

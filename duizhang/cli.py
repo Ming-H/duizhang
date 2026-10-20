@@ -162,6 +162,7 @@ def cmd_ask(args):
     if args.json:                         # 机器态：整态 JSON（脚本消费）
         keep = ("query", "mode", "route", "relevance", "verdict", "coverage",
                 "answer", "citations", "trace", "timing", "elapsed",
+                "trend_audit",
                 "effective_query", "understanding",
                 "agent_steps", "subgoals", "derived", "memory_hit")
         print(_json.dumps({k: st.get(k) for k in keep},
@@ -179,6 +180,8 @@ def cmd_ask(args):
                  for i, n in enumerate(tr)]
         head = "" if st.get("verdict") == "pass" \
             else f"[{st.get('verdict')}/{st.get('coverage')}] "
+        if st.get("trend_audit"):
+            print(st["trend_audit"], file=sys.stderr)   # 审计账本（-v）
         print(f"{head}trace: {' → '.join(steps)}  总耗时 {st.get('elapsed')}s",
               file=sys.stderr)
         # ReAct 步级观测（v0.7 Phase 1）：-v 逐行打印 Thought/Action/
