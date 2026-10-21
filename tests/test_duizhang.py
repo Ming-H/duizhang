@@ -1458,3 +1458,20 @@ def test_direction_gate_second_order_pass():
     assert direction_gate("同比从 146% 降至 37%，营收增速回落", sk) is None
     assert direction_gate("营收增长稳健", sk) is None
     assert direction_gate("营收大幅回落", sk) is not None
+
+
+def test_ingest_file_rejects_zero_chunk_pdf(tmp_path):
+    """空文档闸门（v0.7 正确性批）：扫描版 PDF（每页抽不出文本）在
+    ingest_file 出口显式拒收——修前 0 块文档「成功」入库且 manifest
+    指纹锁死，永不重试；库里留一具检索不可见、问答永空手的空壳。"""
+    from pypdf import PdfWriter
+
+    from duizhang.ingest import ingest_file
+    w = PdfWriter()
+    for _ in range(3):
+        w.add_blank_page(width=595, height=842)   # A4（空 writer 需显式尺寸）
+    p = tmp_path / "空壳公司_2025年年度报告.pdf"
+    with open(p, "wb") as f:
+        w.write(f)
+    with pytest.raises(ValueError, match="扫描版|空文档|0 块"):
+        ingest_file(p)

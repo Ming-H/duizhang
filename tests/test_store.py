@@ -57,6 +57,23 @@ def test_readd_after_drop_no_ghost(db):
                 corp.search("净利润", k=8, doc_filter="欧科亿")}) <= n1
 
 
+def test_add_doc_failure_is_atomic(db):
+    """add_doc 原子性回归：drop+insert 必须同一事务——插入阶段抛错时
+    旧文档完整保留。修前 drop_doc 先自提交，插入崩溃后文档消失：
+    manifest 已删、检索静默缺文档，直到下一次 ingest 才自愈（--watch
+    ≤60s，一次性用户可能永远不自愈——DB 与磁盘不一致）。"""
+    _add(db)
+    n_before = db.counts()
+    doc, chunks = ingest_file(PDF)
+    bad = chunks[0]
+    bad.page = object()          # sqlite3 无法适配的类型 → INSERT 阶段抛错
+    with pytest.raises(Exception):
+        db.add_doc(doc, [bad])
+    assert db.counts() == n_before            # 旧文档原封不动（含 manifest）
+    corp = Corpus.load(db.db_path)
+    assert corp.search("净利润", k=3, doc_filter="欧科亿")   # 检索仍命中
+
+
 def test_rebuild_fts_idempotent(db):
     _add(db)
     n = db.rebuild_fts()

@@ -249,6 +249,12 @@ def ingest_file(path: str | Path) -> tuple[Doc, list[Chunk]]:
                 doc_id=doc_id, page=pno if str(path).lower().endswith(".pdf") else 0,
                 seq=seq, text=block, is_table=is_table, num_notes=notes,
             ))
+    if not chunks:
+        # 空文档闸门（v0.7 正确性批）：0 块文档静默入库后 manifest 指纹
+        # 锁死、永不重试，库里留一具问答永空手的空壳——显式失败让 cli
+        # 的 ⚠ 链路报告（扫描版 PDF / 全空 md）
+        raise ValueError(
+            f"{path} 摄取出 0 块——疑似扫描版 PDF 或空文档，拒收")
     return doc, chunks
 
 

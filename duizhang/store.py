@@ -91,11 +91,13 @@ class Store:
 
         幂等契约：同 doc_id 重复写入 = 完全替换（先清后写）。不能靠
         INSERT OR REPLACE——chunks 的 REPLACE 会换新 rowid，旧 rowid 的
-        fts 行不被覆盖，留下幽灵命中。
+        fts 行不被覆盖，留下幽灵命中。**清与写同一事务**（v0.7 正确性
+        批）：修前 drop_doc 先自提交，插入阶段崩溃后文档消失、manifest
+        已删——检索静默缺文档直到下一次 ingest 才自愈。
         """
         con = self.con
-        self.drop_doc(doc.doc_id)
         with con:
+            self._drop_doc_tx(con, doc.doc_id)
             con.execute("INSERT OR REPLACE INTO docs VALUES (?,?,?,?,?,?)",
                         (doc.doc_id, doc.company, doc.period, doc.kind,
                          doc.source, doc.n_pages))
@@ -110,19 +112,25 @@ class Store:
                 con.execute("INSERT INTO fts_c(rowid, content_c) VALUES (?,?)",
                             (rowid, char_text(c.text)))
 
+    @staticmethod
+    def _drop_doc_tx(con, doc_id: str) -> None:
+        """四表删除语句（不开事务——由调用方的事务包住：
+        drop_doc 独立删，add_doc 在写事务内清旧）。fts 与 chunks 的
+        rowid 对齐在删除侧同样成立：先收 rowid，再删 fts，最后删
+        chunks。"""
+        rowids = [r[0] for r in con.execute(
+            "SELECT rowid FROM chunks WHERE doc_id=?", (doc_id,))]
+        con.executemany("DELETE FROM fts_w WHERE rowid=?", [(r,) for r in rowids])
+        con.executemany("DELETE FROM fts_c WHERE rowid=?", [(r,) for r in rowids])
+        con.execute("DELETE FROM chunks WHERE doc_id=?", (doc_id,))
+        con.execute("DELETE FROM docs WHERE doc_id=?", (doc_id,))
+        con.execute("DELETE FROM manifest WHERE doc_id=?", (doc_id,))
+        con.execute("DELETE FROM vecs WHERE doc_id=?", (doc_id,))
+
     def drop_doc(self, doc_id: str) -> None:
-        """四表删除。fts 与 chunks 的 rowid 对齐在删除侧同样成立：
-        先收 rowid，再删 fts，最后删 chunks。"""
-        con = self.con
-        with con:
-            rowids = [r[0] for r in con.execute(
-                "SELECT rowid FROM chunks WHERE doc_id=?", (doc_id,))]
-            con.executemany("DELETE FROM fts_w WHERE rowid=?", [(r,) for r in rowids])
-            con.executemany("DELETE FROM fts_c WHERE rowid=?", [(r,) for r in rowids])
-            con.execute("DELETE FROM chunks WHERE doc_id=?", (doc_id,))
-            con.execute("DELETE FROM docs WHERE doc_id=?", (doc_id,))
-            con.execute("DELETE FROM manifest WHERE doc_id=?", (doc_id,))
-            con.execute("DELETE FROM vecs WHERE doc_id=?", (doc_id,))
+        """四表删除（独立事务）。"""
+        with self.con:
+            self._drop_doc_tx(self.con, doc_id)
 
     # ── 向量层（P1.2 可选路：bge-small-zh @ fastembed，DZ_VEC=off 关闭）──
 

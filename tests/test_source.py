@@ -98,3 +98,23 @@ def test_ingest_second_root_keeps_first_root_docs(tmp_path):
     docs = {r[0] for r in con.execute("SELECT doc_id FROM docs")}
     con.close()
     assert docs == {"欧科亿_2026H1E", "海伦哲_2026Q1"}
+
+
+def test_scan_fingerprint_is_content_hash(tmp_path):
+    """指纹=内容哈希而非 mtime+size（v0.7 正确性批）：保 mtime 改内容
+    （cp -p / rsync -a 场景）必须检出；touch（内容未变）不得假更新。
+    修前 mtime_ns+size 对前者漏检——语料静默过期，检索答旧数。"""
+    import os
+
+    from duizhang import source
+    f = tmp_path / "a公司_2025年年度报告.md"
+    f.write_text("营收 100 万")
+    fp1 = source.scan(tmp_path)[str(f)]
+    # 内容不变 + touch → 指纹不变（哈希只看内容，不假更新）
+    os.utime(f, ns=(f.stat().st_atime_ns + 10**9, f.stat().st_mtime_ns + 10**9))
+    assert source.scan(tmp_path)[str(f)] == fp1
+    # 内容变 + mtime 恢复旧值 → 指纹必须变（rsync -a 漏检场景）
+    old_mt = f.stat().st_mtime_ns
+    f.write_text("营收 200 万")
+    os.utime(f, ns=(old_mt, old_mt))
+    assert source.scan(tmp_path)[str(f)] != fp1
