@@ -34,16 +34,24 @@ python -m duizhang.cli eval
 
 ```
 离线：PDF/MD ─→ 文件名元数据 ─→ 页眉剥离 ─→ 表格感知分块 ─→ 数字归一化
-                （manifest 指纹增量：增/改/删自适应，幂等）
+                （manifest 指纹增量：SHA-256 内容哈希，增/改/删自适应，幂等）
                      ↓
-              sqlite（docs / chunks / fts_w / fts_c / manifest）
+              sqlite（docs / chunks / fts_w / fts_c / manifest / verified_facts
+                      + 可选 vecs / vecmeta）
 
-在线（LangGraph 状态机）：
-  问题 → route（三分类 + 期间守卫）
-        → retrieve（双轨 FTS5 RRF + 公司过滤 + 同义扩展 + 期间硬过滤）
-        → grade_docs ─不足→ rewrite_query ─≤1次→ retrieve   # 有界纠错环
+在线（LangGraph 状态机，v0.7）：
+  问题 → understand（LLM 结构化理解 intent/公司/期间 + 八守卫；规则兜底）
+        → memory_probe（L1 台账探针：命中即终答，仍内联过 verify——读不豁免）
+        → route（分发 + 期间守卫：年份对账，库里没有先拒）
+        ├── llm 多跳信号（≥3公司/跨年/≥2指标族）→ plan（子目标清单，
+        │   只删不造 + 检查点验证）→ agent_research（ReAct 工具循环：
+        │   search/metrics_table/derive，步≤6，幂等缓存+重复收手，
+        │   步级四元组 thought/action/obs/gate 观测）
+        ├── heuristic metric/compare → retrieve / decompose → grade ⇄ rewrite（≤1 次）
+        ├── trend → trend_research（确定性期间遍历 + Q2=H1−Q1 差分派生）
+        └── other → refuse
         → generate（heuristic 抽取式 / LLM grounded）
-        → verify_citations（引用覆盖率 <0.45 → 降级；无据 → 拒答）
+        → verify_citations（覆盖率 <0.45 → 降级；无据 → 拒答；任何路径不豁免）
 ```
 
 ## 二、五个核心决策的推理链
@@ -165,7 +173,7 @@ PRAGMA（mmap + 200MB 页缓存）与「两轨轻列、正文延迟取」两个�
 | v0.2 | 自研倒排 + numpy | 60 万块 9ms；1.8GB 内存；117s 重建 |
 | v0.4 | SQLite FTS5 | 39ms 稳态；0.03GB；启动 0.05s；增量 0.8s |
 | v0.6.x | Agentic RAG（Agent 环 + trend 双闸） | agent 集 llm 双脑 1.00；31+9 真值集全绿 |
-| v0.7 | 封闭世界事实 Agent（四支柱） | 130 测试；七数据集 heuristic 全 1.00；waste_rate=eₖ 代理出口 |
+| v0.7 | 封闭世界事实 Agent（四支柱） | 132 测试；七数据集 heuristic 全 1.00；waste_rate=eₖ 代理出口 |
 
 ## 五、扩展路径（按触发条件）
 
@@ -191,9 +199,9 @@ PRAGMA（mmap + 200MB 页缓存）与「两轨轻列、正文延迟取」两个�
 ```
 duizhang/
 ├── schemas.py   数据模型 + GraphState（窄接口契约）
-├── source.py    扫描与三态 diff（增量账本的眼睛，49 行）
+├── source.py    扫描与三态 diff（增量账本的眼睛；SHA-256 内容哈希指纹）
 ├── ingest.py    文件名元数据/表格分块/页眉剥离/数字归一化/查询扩展
-├── store.py     四表唯一写入口（事务 + fts rowid 对齐）
+├── store.py     唯一写入口（六表事务 + fts rowid 对齐 + vecs 级联）
 ├── index.py     分词原语 + 瘦身 Corpus（docs 全量，chunk 按需）
 ├── fts.py       双轨 FTS5 检索 + RRF 融合
 ├── graph.py     LangGraph 状态机（v0.7：memory_probe/plan 新节点 + ReAct 工具循环）
@@ -201,7 +209,9 @@ duizhang/
 ├── answer.py    抽取式生成 + 引用覆盖率对账
 ├── llm.py       可选 LLM 层（OpenAI 兼容，零 key 不加载）
 └── evalx.py     内置评估七集 + steps 步级观测
-tests/           130 用例（conftest 封网；test_v07.py=v0.7 四支柱回归）
+tests/           132 用例（conftest 封网；test_v07.py=v0.7 四支柱回归；
+                 agent/plan 节点白盒回放）
 evals/           七数据集（default/agent/innolight/maotai/quarters/multihop/multiturn）
-docs/            设计文档 ×3 + 本讲解 + 流程动效图（pipeline.html）
+docs/            设计文档 ×6（v0.4–v0.7 + incremental/scale 两篇历史存档）
+                 + 本讲解 + 测试手册 + 评估集设计 + plans/
 ```

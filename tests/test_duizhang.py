@@ -1475,3 +1475,63 @@ def test_ingest_file_rejects_zero_chunk_pdf(tmp_path):
         w.write(f)
     with pytest.raises(ValueError, match="扫描版|空文档|0 块"):
         ingest_file(p)
+
+
+def test_plan_node_replay_whitelist_and_gaps(corpus, monkeypatch):
+    """plan 节点 LLM 回放（v0.7 白盒不变量；此前只有 _validate_plan 单测
+    与结构冒烟，规划路径的假回放缺失）：白名单外动作只删不造、检查点
+    失败的子目标显式进 plan_gaps（不静默吞缺口）、有效子目标证据落池。"""
+    import duizhang.llm as llmx
+    from duizhang.graph import make_nodes
+    plan = make_nodes(corpus)[13]
+    monkeypatch.setattr(llmx, "llm_enabled", lambda: True)
+    replies = iter([
+        {"subgoals": [
+            {"action": "search", "company": "欧科亿", "period": "Q1",
+             "metric": "营收"},
+            {"action": "browse", "company": "欧科亿", "period": "Q1"},   # 白名单外：删
+            {"action": "search", "company": "不存在的公司", "period": "FY",
+             "metric": "净利润"},                                        # 检查点必败：弃
+        ]},
+    ])
+    monkeypatch.setattr(llmx, "chat_json", lambda sys, q, **kw: next(replies))
+    st = plan(new_state("对比欧科亿 2026 年一季度营收和净利润", "llm"))
+    actions = [e["action"] for e in st["subgoals"]]
+    statuses = [e["status"] for e in st["subgoals"]]
+    assert "browse" not in actions                       # 只删不造
+    assert statuses.count("done") >= 1                   # 欧科亿 Q1 可检索出证据
+    assert statuses.count("failed") >= 1                 # 幽灵公司检索不足
+    assert st["plan_gaps"] and "不存在的公司" in st["plan_gaps"][0]
+    assert any(t.startswith("plan:") and "弃" in t for t in st["trace"])
+    assert st["hits"]                                     # 完成子目标的证据在池
+
+
+def test_plan_node_garbage_output_falls_back(corpus, monkeypatch):
+    """规划器输出不可解析（subgoals 非列表）→ 整体回退 agent 环标记，
+    不带半成品状态继续走。"""
+    import duizhang.llm as llmx
+    from duizhang.graph import make_nodes
+    plan = make_nodes(corpus)[13]
+    monkeypatch.setattr(llmx, "llm_enabled", lambda: True)
+    monkeypatch.setattr(llmx, "chat_json",
+                        lambda sys, q, **kw: {"subgoals": "垃圾不是列表"})
+    st = plan(new_state("跨公司对比题", "llm"))
+    assert "plan:invalid→agent" in st["trace"]
+    assert not st.get("hits") and not st.get("subgoals")
+
+
+def test_verify_declares_plan_gaps_not_silent(corpus):
+    """部分答案红线（v0.7 Phase 2）：verify:pass 的答案若带着未完成
+    子目标，出口必须追加「未覆盖」声明——不允许静默吞掉缺口。"""
+    from duizhang.graph import make_nodes
+    verify = make_nodes(corpus)[9]
+    h = _hit("g1", "欧科亿_2026H1E", 1, 0,
+             "预计 2026 年半年度净利润 41,922.46 万元。", 1)
+    st = {"answer": "预计净利润 41,922.46 万元 [欧科亿_2026H1E 第1页]",
+          "citations": ["[欧科亿_2026H1E 第1页]"],
+          "evidence": [h], "hits": [h],
+          "plan_gaps": ["不存在的公司 2025FY 的营收"],
+          "mode": "llm", "query": "对比题", "trace": []}
+    out = verify(st)
+    assert out["verdict"] == "pass"
+    assert "未覆盖" in out["answer"] and "不存在的公司" in out["answer"]
