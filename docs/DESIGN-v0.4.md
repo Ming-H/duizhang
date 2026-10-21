@@ -75,7 +75,7 @@ fts_c(content_c)         tokenize=trigram     ← 原文前 200 字（与旧字�
 ### D3 写入层收敛：Store 模块
 
 ```
-duizhang/store.py（新）
+tally/store.py（新）
   ensure_schema()          四表 DDL（含两个 fts 虚拟表）
   doc_ids() -> set
   add_doc(doc, chunks)     四表事务写入（fts 增量插入，段合并自动）
@@ -90,7 +90,7 @@ duizhang/store.py（新）
 1. 新增 `fts.py`（检索）+ `store.py`（写入）；`index.py` 保留 `word_tokens/
    char_bigrams/expand 依赖`，`Corpus` 重写为瘦身版——**同一次提交内完成替换**
 2. 一次性迁移：`cli` 新增 `index` 子命令，为现有 60.7 万 chunks 建 fts（~2 分钟）
-3. A/B：~~`DZ_BACKEND=memory|fts` 环境变量临时并存~~ **实施偏差**：
+3. A/B：~~`TALLY_BACKEND=memory|fts` 环境变量临时并存~~ **实施偏差**：
    实际未引入双后端开关——以 v0.3 已记录的基线指标（样例集/全库 evalx）
    作为对比基准，比并存两套实现更符合反冗余原则，且删除时点提前为零
 4. 回滚：git revert 单提交即回 v0.3（迁移只增表不删列，v0.3 代码可直接读旧表）

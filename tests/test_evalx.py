@@ -20,13 +20,13 @@ SAMPLES = Path(__file__).resolve().parents[1] / "samples"
 
 
 def _hit(chunk_id, doc_id, text, rank):
-    from duizhang.schemas import Chunk, Retrieved
+    from tally.schemas import Chunk, Retrieved
     return Retrieved(chunk=Chunk(chunk_id=chunk_id, doc_id=doc_id, page=1,
                                  seq=0, text=text), score=0.1, rank=rank)
 
 
 def test_chunk_pr_counts_truth_bearing_chunks():
-    from duizhang.evalx import chunk_pr
+    from tally.evalx import chunk_pr
     case = {"q": "x", "expect_keywords": ["1,568,385,287"],
             "expect_doc": "中际旭创_2025Q1"}
     hits = ([_hit("t1", "中际旭创_2025Q1",
@@ -46,7 +46,7 @@ def test_chunk_pr_counts_truth_bearing_chunks():
 
 
 def test_summarize_reports_faithfulness_and_chunk_pr():
-    from duizhang.evalx import summarize
+    from tally.evalx import summarize
     rows = [dict(q="a", top1="d", kw_hit=True, doc_hit=True, refused=False,
                  ok=True, expect_refused=False),
             dict(q="b", top1="", kw_hit=False, doc_hit=True, refused=True,
@@ -68,7 +68,7 @@ def test_gate_failures_below_threshold():
     """CI 门槛（纯函数）：低于阈值返回失败说明，空列表=过闸。
     修前状态：cmd_eval 永远 exit 0，CI 三集 eval 只防崩溃不防退化——
     命中率跌到 0.3 CI 依然全绿（评估报告发现的头号名实差距）。"""
-    from duizhang.evalx import gate_failures
+    from tally.evalx import gate_failures
     ok_summary = dict(retrieval_top3=1.0, answer_hit=1.0, refusal=1.0)
     assert gate_failures(ok_summary, min_retrieval=1.0, min_hit=1.0) == []
     bad = dict(retrieval_top3=0.9, answer_hit=0.3, refusal=1.0)
@@ -87,7 +87,7 @@ def test_judge_numeric_keyword_full_match():
     右侧放行=数据集前缀截断约定（51.7 对 51.71、38,239 对
     38,239,935,640）——右边界一禁即误杀（innolight 实测 0.963，
     CI 门槛当场抓回，回归锚点）。"""
-    from duizhang.evalx import judge
+    from tally.evalx import judge
 
     def st(a):
         return {"answer": a, "hits": [], "citations": [], "verdict": "pass"}
@@ -114,7 +114,7 @@ def test_judge_numeric_keyword_full_match():
 def test_judge_forbid_keywords_vetoes():
     """forbid_keywords 反向断言：答案出现明确不该出现的值（问扣非却
     答了归母数）→ 该题判 miss——把单测层的负向断言能力上移到 eval 层。"""
-    from duizhang.evalx import judge
+    from tally.evalx import judge
     case = {"q": "扣非净利润多少", "expect_keywords": ["1,568,385,287"],
             "forbid_keywords": ["1,582,876,128"]}
     good = {"answer": "扣非净利润 1,568,385,287.19 元", "hits": [],

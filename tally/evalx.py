@@ -15,8 +15,8 @@ v0.7 新增：
   不是语义级 faithfulness，名不副实会在评审里被拆穿）
 · multiturn 数据集 —— 轮间带 L0 会话记忆的连续问答（每 case 是一串
   turns，判定按轮）
-· eval 默认隔离 L1 台账（DZ_MEMORY=off）——防止把检索能力测成记忆
-  命中；DZ_EVAL_MEMORY=on 显式放开（记忆专项评估用）
+· eval 默认隔离 L1 台账（TALLY_MEMORY=off）——防止把检索能力测成记忆
+  命中；TALLY_EVAL_MEMORY=on 显式放开（记忆专项评估用）
 
 逐题 ✓ 口径与汇总一致：非拒答题必须「关键词命中 且 检索命中」
 （judge()），否则逐题打勾数与 retrieval@3 / answer_hit 对不上。
@@ -182,15 +182,15 @@ def gate_failures(summary: dict, min_retrieval: float | None = None,
 
 def run_eval(corpus, mode: str = "auto", verbose: bool = True,
              dataset: str = "default") -> dict:
-    from duizhang.graph import build_graph
-    from duizhang.memory import append_turn, summarize_turn
-    from duizhang.schemas import new_state
+    from tally.graph import build_graph
+    from tally.memory import append_turn, summarize_turn
+    from tally.schemas import new_state
 
-    # eval 默认隔离 L1 台账（v0.7 Phase 3）：DZ_EVAL_MEMORY=on 才放开
+    # eval 默认隔离 L1 台账（v0.7 Phase 3）：TALLY_EVAL_MEMORY=on 才放开
     # ——记忆命中的答案检索痕迹为空，混跑会把检索指标测虚高
-    prev_env = os.environ.get("DZ_MEMORY")
-    if os.environ.get("DZ_EVAL_MEMORY", "") != "on":
-        os.environ["DZ_MEMORY"] = "off"
+    prev_env = os.environ.get("TALLY_MEMORY")
+    if os.environ.get("TALLY_EVAL_MEMORY", "") != "on":
+        os.environ["TALLY_MEMORY"] = "off"
 
     try:
         app = build_graph(corpus)      # 图只编译一次，逐题 invoke
@@ -243,6 +243,6 @@ def run_eval(corpus, mode: str = "auto", verbose: bool = True,
         return {**summary, "rows": rows}
     finally:
         if prev_env is None:
-            os.environ.pop("DZ_MEMORY", None)
+            os.environ.pop("TALLY_MEMORY", None)
         else:
-            os.environ["DZ_MEMORY"] = prev_env
+            os.environ["TALLY_MEMORY"] = prev_env

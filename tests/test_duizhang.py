@@ -1,8 +1,8 @@
 import pytest
 
-from duizhang.graph import build_graph
-from duizhang.ingest import chunk_page, expand_query, normalize_numbers, parse_filename
-from duizhang.schemas import new_state
+from tally.graph import build_graph
+from tally.ingest import chunk_page, expand_query, normalize_numbers, parse_filename
+from tally.schemas import new_state
 
 SAMPLES = __import__("pathlib").Path(__file__).resolve().parents[1] / "samples"
 
@@ -11,9 +11,9 @@ SAMPLES = __import__("pathlib").Path(__file__).resolve().parents[1] / "samples"
 def corpus(tmp_path_factory):
     """走生产路径建库：Store 写入 → Corpus 加载（与 CLI 完全一致）。"""
 
-    from duizhang.index import Corpus
-    from duizhang.ingest import ingest_file, parse_filename
-    from duizhang.store import Store
+    from tally.index import Corpus
+    from tally.ingest import ingest_file, parse_filename
+    from tally.store import Store
     db = tmp_path_factory.mktemp("dz") / "test.db"
     store = Store(db)
     for f in sorted(SAMPLES.glob("*.pdf")) + sorted(SAMPLES.glob("*.md")):
@@ -81,7 +81,7 @@ def test_parse_filename_rejects_non_company_fallback():
     """P0.5：兜底通道抽出的「公司名」是日期/纯数字（20261009_永和…分析.md
     → company=20261009 → doc_id 20261009_MD 垃圾入库）时拒收——
     cli 以 ⚠ 跳过，不静默降级。含 CJK 主干的分析文件照常 ANALYSIS。"""
-    from duizhang.ingest import parse_filename
+    from tally.ingest import parse_filename
     with pytest.raises(ValueError):
         parse_filename("20261009_永和股份三季预告_静水CANSLIM分析.md")
     company, _period, kind = parse_filename("永和股份_分析.md")
@@ -91,7 +91,7 @@ def test_parse_filename_rejects_non_company_fallback():
 def test_period_hints_exclusive():
     """「半年度」包含「年度」：顺序判定会让 FY 混进半年度问题的
     期间过滤，年报块随之淹没正确期间（2026-10-14 全量库实测）。"""
-    from duizhang.graph import period_hints
+    from tally.graph import period_hints
     assert period_hints("欧科亿 2026 年半年度预计净利润多少") == ["H1"]
     assert period_hints("2026 半年报营收") == ["H1"]
     assert period_hints("中报怎么样") == ["H1"]
@@ -110,7 +110,7 @@ def test_period_hints_bare_year_is_fy():
     否则期间过滤为空 → 各期间文档混排，半年报/一季报的数顶掉年报数
     （2026-10-19 innolight 库实测 6 处失败共同根因）。年份判定复用
     query_years（含口语二位「15年」）。无年份仍不限定。"""
-    from duizhang.graph import period_hints
+    from tally.graph import period_hints
     assert period_hints("中际旭创 2025 年营业收入多少") == ["FY"]
     assert period_hints("15 年营收") == ["FY"]          # 口语二位年份同口径
     assert period_hints("营收多少") == []                # 无年份 → 不限定
@@ -121,7 +121,7 @@ def test_period_hints_bare_year_is_fy():
 
 
 def _hit(chunk_id, doc_id, page, seq, text, rank):
-    from duizhang.schemas import Chunk, Retrieved
+    from tally.schemas import Chunk, Retrieved
     return Retrieved(chunk=Chunk(chunk_id=chunk_id, doc_id=doc_id, page=page,
                                  seq=seq, text=text), score=0.1, rank=rank)
 
@@ -130,7 +130,7 @@ def test_coverage_counts_cited_chunks_beyond_rank4():
     """抽取式从 hits[:8] 抽句（答案块常在第 4 名开外，见 extractive 注释），
     覆盖率的证据池必须含「答案实际引用的块」——否则自家抽取式答案
     被自家 verify 误判 degraded（全量库实测 trace: verify:degraded(0.37)）。"""
-    from duizhang.answer import citation_coverage
+    from tally.answer import citation_coverage
     filler = [_hit(f"f{i}", "d", 1, i, "无关内容占位句子。", i + 1) for i in range(4)]
     cited = _hit("c5", "d", 2, 0, "预计 2026 年半年度净利润 36,000 万元。", 5)
     answer = f"预计 2026 年半年度净利润 36,000 万元。 {cited.chunk.citation}"
@@ -140,7 +140,7 @@ def test_coverage_counts_cited_chunks_beyond_rank4():
 def test_verify_passes_for_md_doc_citations():
     """MD/TXT 块 page=0，引用格式是 [doc_id]（无「第N页」也没有 `_\d{4}`
     期间后缀），正则漏判会让 MD 文档的抽取式答案永远 degraded。"""
-    from duizhang.answer import verify
+    from tally.answer import verify
     h = _hit("永和股份_MD#p0#0", "永和股份_MD", 0, 0,
              "永和股份三季度预告归母净利润预计增长。", 1)
     answer = f"永和股份三季度预告归母净利润预计增长。 {h.chunk.citation}"
@@ -153,7 +153,7 @@ def test_citation_matching_survives_space_drift():
     「doc_id第8页」粘连），chunk.citation 精确子串匹配不认 → has_citation
     挂 → 有据答案全 degraded、compare 题结论句被抽取式顶掉（2026-10-19
     llm 模式实测：cov=0.8 仍 degraded）。匹配必须对空白不敏感。"""
-    from duizhang.answer import citation_coverage, has_citation, verify
+    from tally.answer import citation_coverage, has_citation, verify
     h = _hit("c1", "中际旭创_2025FY", 8, 0,
              "2025 年营业收入 38,239,935,640.67 元。", 1)
     fact = "2025 年营业收入 38,239,935,640.67 元"
@@ -168,8 +168,8 @@ def test_citation_matching_survives_space_drift():
 def test_extractive_notes_follow_picked_chunks():
     """数字注释应来自「被选中句所在的块」而非固定 top1——关键数字句常在
     第 2 名开外，注释缺席会让「≈4.19亿」类问法打不中（eval kw 实测）。"""
-    from duizhang.answer import extractive_answer
-    from duizhang.schemas import new_state
+    from tally.answer import extractive_answer
+    from tally.schemas import new_state
     h1 = _hit("n1", "d", 1, 0, "欧科亿业绩预告情况的自愿性披露公告。", 1)
     h2 = _hit("n2", "d", 2, 1, "预计 2026 年半年度净利润 41,922.46 万元。", 2)
     h2.chunk.num_notes = ["≈4.19亿"]
@@ -183,8 +183,8 @@ def test_extractive_skips_boilerplate_header_sentences():
     """页眉句（公司名+报告标题）靠 query 里的公司名/期间得分，真实数字句
     反而落选（全量库实测：海伦哲题 4 句全是同一条页眉）。公司名与元词
     子串（第一季度⊃季度）都不得计分。"""
-    from duizhang.answer import extractive_answer
-    from duizhang.schemas import new_state
+    from tally.answer import extractive_answer
+    from tally.schemas import new_state
     header = _hit("h1", "海伦哲_2026Q1", 10, 0,
                   "徐州海伦哲专用车辆股份有限公司 2026年第一季度报告", 1)
     fact = _hit("h2", "海伦哲_2026Q1", 3, 1,
@@ -200,9 +200,9 @@ def test_verify_pool_includes_beyond_rank4_hits():
     窗口，extractive 却从 hits[:8] 抽句——rank 5–8 被引块缺席会让正确
     答案被误标 degraded（拼接行常排中段，2025Q1 扣非实测 0.395）。
     与 coverage 层 test_coverage_counts_cited_chunks_beyond_rank4 同哲学。"""
-    from duizhang.graph import make_nodes
-    from duizhang.index import Corpus
-    from duizhang.schemas import new_state
+    from tally.graph import make_nodes
+    from tally.index import Corpus
+    from tally.schemas import new_state
     nodes = make_nodes(Corpus.__new__(Corpus))       # verify 不查库
     verify = nodes[9]
     fact = _hit("c6", "中际旭创_2025Q1", 3, 5,
@@ -224,8 +224,8 @@ def test_extractive_splits_fix_jingzichan_row():
     净资产（元）」行被切成「者权益（元） 20,714,619,471.62 …」——
     query 的「净资产/股东」与残片零重叠，真值行落选（净资产题实测
     kw=N）。注入映射后应抽中。"""
-    from duizhang.answer import extractive_answer
-    from duizhang.schemas import new_state
+    from tally.answer import extractive_answer
+    from tally.schemas import new_state
     broken = _hit("z", "中际旭创_2025Q1", 3, 11,
                   "者权益（元） 20,714,619,471.62 19,133,887,012.66 8.26%", 1)
     st = new_state("中际旭创 2025 一季度归属于上市公司股东的净资产多少",
@@ -239,8 +239,8 @@ def test_extractive_caliber_guard_koufei_vs_revenue():
     抢答营收/净利问句——rewrite 会给 effective_query 追加通用词
     （净利润/扣非净利润），拼接后的扣非行标签+数字齐全、词面全中，
     实测顶掉营收行（25 年年报营收答成扣非 10,710,053,246.51）。"""
-    from duizhang.answer import extractive_answer
-    from duizhang.schemas import new_state
+    from tally.answer import extractive_answer
+    from tally.schemas import new_state
     koufei = _hit("kf", "中际旭创_2025FY", 8, 4,
                   "归属于上市公司股东的扣除非经常性损益的净利润（元）"
                   " 10,710,053,246.51 5,068,356,338.29 111.31%", 1)
@@ -258,8 +258,8 @@ def test_front_key_table_cap_and_reason_skip():
     """D14 前置封顶：主要会计数据表整页前置（长页 12+ 块）会淹没 Agent
     自己收集的证据；归因题（原因/为什么/变动）要的是叙事证据，表格行
     前置只会挤掉归因句——跳过。"""
-    from duizhang.graph import front_key_table
-    from duizhang.schemas import Doc
+    from tally.graph import front_key_table
+    from tally.schemas import Doc
     key_page = [_hit(f"k{i}", "中际旭创_2025Q1", 3, i, f"表行{i} 1,234,567.8", i)
                 for i in range(12)]
     agent_hit = _hit("a1", "中际旭创_2025FY", 94, 0,
@@ -290,8 +290,8 @@ def test_trend_generate_cites_only_skeleton_docs():
     """trend 引用收窄：引用列表必须等于骨架行里实际出现的引用——
     此前 cite 全部 hits 的引用（含骨架没采用行的期间/页），引用列表
     虚胖且不可回溯到答案文本。"""
-    from duizhang.graph import make_nodes
-    from duizhang.schemas import new_state
+    from tally.graph import make_nodes
+    from tally.schemas import new_state
 
     class _C:                      # trend 分支只需页查询能力
         @staticmethod
@@ -318,7 +318,7 @@ def test_stitch_adjacent_table_rows():
     1,568,385,287.19）。光数值块无词面可与 query 命中，检索只召回标签块
     ——句级打分丢无数字句，扣非题答成归母值（seq18 页 10 标签+数字
     齐全抢答）。拼接把同页相邻的标签块+数值块合成整行。"""
-    from duizhang.graph import stitch_adjacent
+    from tally.graph import stitch_adjacent
     label = _hit("a#p3#4", "中际旭创_2025Q1", 3, 4,
                  "归属于上市公司股东的扣除 非经常性损益的净利润 （元）", 1)
     nums = _hit("a#p3#5", "中际旭创_2025Q1", 3, 5,
@@ -356,7 +356,7 @@ def test_rule_understand_resolves_short_company_alias():
             for d, co in zip(self.docs.values(), companies):
                 d.company = co
 
-    from duizhang.graph import rule_understand
+    from tally.graph import rule_understand
     c = Corp("贵州茅台", "中际旭创", "欧科亿")
     assert rule_understand("茅台 2026 年半年度扣非净利润多少",
                            c)["companies"] == ["贵州茅台"]
@@ -379,7 +379,7 @@ def test_trend_skeleton_line_level_rows():
     期归母整行缺失（茅台实测 506.0/506.0），verify 满分放行——数字
     确实都在引用页，闸门管不住取错行。行级切分 + 指标词之后取首个
     大数，两指标独立取值。"""
-    from duizhang.graph import trend_skeleton
+    from tally.graph import trend_skeleton
     blk = _hit("a#p1#1", "贵州茅台_2025Q1", 1, 1,
                "营业收入（元） 50,605,268,444.40 45,024,567,890.12 12.4%\n"
                "归属于上市公司股东的净利润（元） 26,852,113,255.66 "
@@ -402,8 +402,8 @@ def test_extractive_caliber_mirror_prefers_koufei_row():
     （问句「扣非」与证据「扣除非经常性损益」零词面重叠，守卫放行
     了但打分赢不了）。降权让位，降权不跳过（「扣非和归母差多少」
     类双口径问句仍可见归母句）。"""
-    from duizhang.answer import extractive_answer
-    from duizhang.schemas import Chunk, Retrieved
+    from tally.answer import extractive_answer
+    from tally.schemas import Chunk, Retrieved
     prose = Retrieved(chunk=Chunk(chunk_id="m#p6#2", doc_id="贵州茅台_2026H1",
                                   page=6, seq=2,
                                   text="归属于上 市公司股东的净利润 445.17 亿元，同比下降 1.95%。"),
@@ -426,7 +426,7 @@ def test_trend_pick_survives_koufei_label_tail_on_same_line():
     归母行陪葬（茅台 2025H1/2026H1 归母缺失实测）。守卫改为只看指标
     词前 20 字的标签上下文：归母自己的标签（归属于上市公司股东的）
     不含扣除 → 放行；扣非行的标签含扣除 → 照旧跳过。"""
-    from duizhang.graph import trend_skeleton
+    from tally.graph import trend_skeleton
     blk = _hit("a#p5#2", "贵州茅台_2025H1", 5, 2,
                "营业收入 89,389,354,416.84 81,930,977,667.75 9.10 "
                "利润总额 62,778,000,766.82 57,578,281,653.44 9.03 "
@@ -450,7 +450,7 @@ def test_trend_pick_falls_back_when_best_line_fails_parse():
     ≥1e6 原币门槛——只取最佳一行会 解析 None→该指标整行丢失
     （茅台 2025H1/2026H1 归母缺失实测根因）。按分数降序回退到
     第一个可解析行。"""
-    from duizhang.graph import trend_skeleton
+    from tally.graph import trend_skeleton
     table = _hit("a#p5#2", "贵州茅台_2025H1", 5, 2,
                  "营业收入 89,389,354,416.84 81,930,977,667.75 9.10 "
                  "利润总额 62,778,000,766.82 57,578,281,653.44 9.03 "
@@ -477,8 +477,8 @@ def test_extractive_sibling_metric_demotion():
     净资产块 4.4 分顶掉扣非行 1.6 分，44,464,207,646.01 落选）；
     ③ 问总收入时营业收入句让位（子口径冒充总口径，真值 92,278,
     072,083.21，P1#5）。"""
-    from duizhang.answer import extractive_answer
-    from duizhang.schemas import Chunk, Retrieved
+    from tally.answer import extractive_answer
+    from tally.schemas import Chunk, Retrieved
 
     def _mk(cid, page, seq, text, rank):
         return Retrieved(chunk=Chunk(chunk_id=cid, doc_id="贵州茅台_2026H1",
@@ -536,8 +536,8 @@ def test_caliber_mismatch_gate():
     答扣非题、营业收入 90,703,260,964.48 答总收入题，数字都在证据页
     verify 照样 pass（引用级闸门够不着行选择，§9 边界第一处收口）。
     证据无该口径行 → False（检索缺口不归闸门背）。"""
-    from duizhang.graph import caliber_mismatch
-    from duizhang.schemas import Chunk
+    from tally.graph import caliber_mismatch
+    from tally.schemas import Chunk
 
     def _c(text):
         return Chunk(chunk_id="x", doc_id="贵州茅台_2026H1", page=5, seq=1,
@@ -571,7 +571,7 @@ def test_page_evidence_stratifies_pages():
     hits 队头，原 hits[:top_n] 切片全落在同一页——利润表/MD&A 页永远
     进不了 LLM 证据（总收入题 0.8b 只见 p5 营业收入行）。改为扫到凑
     满 top_n 个不同页为止。"""
-    from duizhang.graph import page_evidence
+    from tally.graph import page_evidence
 
     def _h(cid, page, seq):
         return _hit(cid, "贵州茅台_2026H1", page, seq, f"块{cid}", 1)
@@ -597,7 +597,7 @@ def test_trend_skeleton_rejects_koufei_for_default_caliber():
     """口径守卫：skeleton 的「归母净利」默认归母口径——含「扣除/
     扣非」的行是另一口径，词面同样含「净利润」，不加守卫时先到
     先得会拿扣非数当归母（1,568,385,287.19 vs 1,582,876,128.67）。"""
-    from duizhang.graph import trend_skeleton
+    from tally.graph import trend_skeleton
     koufei = _hit("a#p3#5", "中际旭创_2025Q1", 3, 5,
                   "扣除非经常性损益的净利润（元） 1,568,385,287.19 "
                   "990,216,569.13 58.39%", 1)      # 扣非行放前排：先到先得
@@ -612,8 +612,8 @@ def test_period_filter_is_doc_level():
     """期间硬过滤必须是文档级：命中级后过滤下，大文档（年报几百块）会把
     目标期间块挤出 top-8，exact 落空回退未过滤结果——拿年报答一季报
     （全量库实测：欧科亿 Q1 同比题拿 2025 年报 29.30% 作答）。"""
-    from duizhang.graph import make_nodes
-    from duizhang.schemas import Chunk, Doc, Retrieved, new_state
+    from tally.graph import make_nodes
+    from tally.schemas import Chunk, Doc, Retrieved, new_state
 
     class FakeCorpus:
         def __init__(self):
@@ -642,18 +642,18 @@ def test_retrieve_year_scope():
 
     class YearCorpus:
         def __init__(self):
-            from duizhang.schemas import Doc
+            from tally.schemas import Doc
             self.docs = {f"中际旭创_{y}Q1": Doc(f"中际旭创_{y}Q1", "中际旭创",
                                                 f"{y}Q1", "一季报", "x", 5)
                          for y in (2024, 2025, 2026)}
 
         def search(self, query, k=8, doc_filter="", doc_scope=None):
-            from duizhang.schemas import Chunk, Retrieved
+            from tally.schemas import Chunk, Retrieved
             return [Retrieved(Chunk(f"{d}#c", d, 9, 0, "营业总收入 1"),
                               0.1, i + 1)
                     for i, d in enumerate(doc_scope or [])][:k]
 
-    from duizhang.graph import make_nodes
+    from tally.graph import make_nodes
     retrieve = make_nodes(YearCorpus())[2]
     st = new_state("中际旭创 2025 年第一季度营业收入多少", "heuristic")
     out = retrieve(st)
@@ -663,7 +663,7 @@ def test_retrieve_year_scope():
 def test_ingest_drops_empty_table_headers():
     """空表头块（纯列名、≥3 位数字少于 2 个）是检索噪声（实测 17% 的
     表格块）——落库前丢弃；有数据的表格块与正文块不受影响。"""
-    from duizhang.ingest import keep_block
+    from tally.ingest import keep_block
     assert keep_block("项目 2026年半年度 2025年半年度", True) is False   # 空表头
     assert keep_block("营业收入 644,051,473.82 301,672,910.35", True) is True
     assert keep_block("这是一段正常正文，含有句号。", False) is True
@@ -676,7 +676,7 @@ def test_page_evidence_window():
 
     class PageCorpus:
         def __init__(self):
-            from duizhang.schemas import Chunk
+            from tally.schemas import Chunk
             self.pages = {("d", 5): [Chunk(f"d#p5#{i}", "d", 5, i,
                                            f"第5页第{i}句。") for i in range(8)],
                           ("d", 9): [Chunk(f"d#p9#{i}", "d", 9, i,
@@ -685,7 +685,7 @@ def test_page_evidence_window():
         def chunks_page(self, doc_id, page):
             return self.pages.get((doc_id, page), [])
 
-    from duizhang.graph import page_evidence
+    from tally.graph import page_evidence
     hits = [_hit("d#p5#4", "d", 5, 4, "第5页第4句。", 1),
             _hit("d#p9#1", "d", 9, 1, "第9页第1句。", 2)]
     chunks = page_evidence(hits, PageCorpus())
@@ -701,12 +701,12 @@ def test_generate_stores_page_evidence_for_verify(monkeypatch):
 
     class EvidCorpus:
         def chunks_page(self, doc_id, page):
-            from duizhang.schemas import Chunk
+            from tally.schemas import Chunk
             return [Chunk("d#p5#1", "d", 5, 1, "兄弟块：同比增长 50%。"),
                     Chunk("d#p5#2", "d", 5, 2, "命中块本块。")]
 
-    from duizhang import llm as llmx
-    from duizhang.graph import make_nodes
+    from tally import llm as llmx
+    from tally.graph import make_nodes
     generate = make_nodes(EvidCorpus())[5]
     monkeypatch.setattr(llmx, "llm_enabled", lambda: False)
     st = generate({**new_state("d 营收", "heuristic"),
@@ -718,8 +718,8 @@ def test_extractive_expands_query_terms():
     """抽取式打分必须用扩展后的检索词：query 口语词（营收/revenue）与
     证据财报术语（营业总收入）零词元重叠 → 空手拒答（heuristic
     innolight 实测 T4 两题 refused）。"""
-    from duizhang.answer import extractive_answer
-    from duizhang.schemas import new_state
+    from tally.answer import extractive_answer
+    from tally.schemas import new_state
     h = _hit("c1", "中际旭创_2026H1", 55, 0,
              "一、营业总收入 41,777,861,795.03 14,789,074,837.80", 1)
     st = new_state("中际旭创 2026 半年度营收多少", "heuristic")
@@ -736,12 +736,12 @@ def test_trend_skeleton_mode_independent():
         docs = {}
 
         def chunks_page(self, doc_id, page):
-            from duizhang.schemas import Chunk
+            from tally.schemas import Chunk
             return [Chunk(f"{doc_id}#c", doc_id, page, 0,
                           "营业收入（元） 6,674,176,487.23 4,842,546,924.23"
                           " 37.82%")]
 
-    from duizhang.graph import make_nodes
+    from tally.graph import make_nodes
     generate = make_nodes(TrendCorpus2())[5]
     st = generate({**new_state("中际旭创最近几个季度营收趋势", "heuristic"),
                    "hits": [_hit("中际旭创_2025Q1#c", "中际旭创_2025Q1",
@@ -757,7 +757,7 @@ def test_trend_skeleton_mode_independent():
 def test_two_digit_year_parsing():
     """口语「15年中报」指 2015——二位年份必须解析，库里没有 2015
     应触发期间守卫拒答，而非静默答成 2025（用户实测）。"""
-    from duizhang.graph import query_years
+    from tally.graph import query_years
     assert query_years("中际旭创15年中报") == {"2015"}
     assert query_years("2026 年报和 25 年一季报") == {"2026", "2025"}
     assert query_years("营收 100 元") == set()          # 金额不误判为年份
@@ -770,12 +770,12 @@ def test_summarize_anchors_mda_section():
 
     class MdaCorpus:
         def __init__(self):
-            from duizhang.schemas import Doc
+            from tally.schemas import Doc
             self.docs = {"中际旭创_2025H1": Doc(
                 "中际旭创_2025H1", "中际旭创", "2025H1", "半年报", "x", 188)}
 
         def search(self, q, k=6, doc_filter="", doc_scope=None):
-            from duizhang.schemas import Chunk, Retrieved
+            from tally.schemas import Chunk, Retrieved
             if "经营" in q:      # MD&A 探针 → 章节首块
                 return [Retrieved(chunk=Chunk("mda", "中际旭创_2025H1", 10, 0,
                     "第三节 管理层讨论与分析"), score=0.3, rank=1)]
@@ -787,7 +787,7 @@ def test_summarize_anchors_mda_section():
             return []
 
         def chunks_page(self, doc_id, page):
-            from duizhang.schemas import Chunk
+            from tally.schemas import Chunk
             return [Chunk("mda#1", doc_id, page, 1,
                           "报告期内，公司实现营业收入 147.9 亿元，AI 算力需求"
                           "持续高景气，管理层认为高端光模块产能稳步释放。"),
@@ -796,7 +796,7 @@ def test_summarize_anchors_mda_section():
                     Chunk("mda#3", doc_id, page, 3,
                           "子公司向本公司出售资产所发生的未实现内部交易损益抵销。")]
 
-    from duizhang.graph import make_nodes
+    from tally.graph import make_nodes
     summarize = make_nodes(MdaCorpus())[7]
     st = summarize({**new_state("中际旭创 2025 中报管理层是怎么说的", "heuristic"),
                     "understanding": {"intent": "summary",
@@ -811,7 +811,7 @@ def test_trend_intent_and_period_order():
     """trend 意图：趋势词触发、优先级低于 compare；报告期按时间序
     （period 后缀映射月份——字典序会把 H1 排在 Q1 前，时间上是错的）；
     「季度」类问法过滤季度粒度。"""
-    from duizhang.graph import _period_key, rule_understand
+    from tally.graph import _period_key, rule_understand
     u = rule_understand("中际旭创最近几个季度营收的趋势", _MiniCorpus())
     assert u["intent"] == "trend"
     u2 = rule_understand("对比欧科亿和海伦哲 2026 一季报营收", _MiniCorpus())
@@ -824,7 +824,7 @@ def test_trend_skeleton_structured_rows():
     """趋势骨架 = 结构化行（期间/营收亿/同比/净利亿），非原始表格行：
     本期/同期/同比混排一串数字可读性差（用户实测「很乱」）；断词行
     「润（元）…」解析为净利；解析失败该指标省略而非打印错数。"""
-    from duizhang.graph import trend_skeleton
+    from tally.graph import trend_skeleton
     hits = [_hit("d#p8#1", "中际旭创_2025H1", 8, 1,
                  "营业收入（元） 14,789,074,837.80 10,798,594,185.75"
                  " 10,798,594,185.75 36.95%", 1),
@@ -840,11 +840,11 @@ def test_trend_skeleton_structured_rows():
 def test_trend_analysis_number_gate(monkeypatch):
     """投资分析放开 LLM，但分析里的数字必须来自数据行（可验证闸门，
     而非一刀切禁数字）——出现表外数字整个分析段丢弃，宁缺毋滥。"""
-    from duizhang.graph import trend_skeleton
+    from tally.graph import trend_skeleton
     rows = trend_skeleton([_hit("d#p8#1", "中际旭创_2025H1", 8, 1,
                                 "营业收入（元） 14,789,074,837.80 10,798,594,185.75"
                                 " 36.95%", 1)])
-    gate = __import__("duizhang.graph", fromlist=["_analysis_numbers_ok"])
+    gate = __import__("tally.graph", fromlist=["_analysis_numbers_ok"])
     ok = gate._analysis_numbers_ok("2025H1 营收 147.9 亿（+36.95%），增长强劲。", rows)
     bad = gate._analysis_numbers_ok("预计 2027 年营收将达 800 亿。", rows)
     assert ok is True and bad is False
@@ -855,8 +855,8 @@ def test_understand_period_override_and_trend_necessity(app, monkeypatch):
     明确期间词时规则是确定性匹配，应覆盖 LLM 的非空错值（原守卫只
     补空）；②「预计净利润多少」被判 trend（无趋势词）——trend 的
     必要条件是 query 含趋势词，否则降级 metric。"""
-    from duizhang import llm as llmx
-    from duizhang.graph import make_nodes
+    from tally import llm as llmx
+    from tally.graph import make_nodes
     understand = make_nodes(_MiniCorpus())[0]
     monkeypatch.setattr(llmx, "llm_enabled", lambda: True)
     # ① LLM 给错期间（H1），query 明确说第一季度 → 覆盖为 Q1
@@ -875,8 +875,8 @@ def test_understand_period_override_and_trend_necessity(app, monkeypatch):
 
 def test_understand_trend_guard(app, monkeypatch):
     """0.8b 实测把趋势问句判成 summary——守卫纠正（与 compare 守卫同款）。"""
-    from duizhang import llm as llmx
-    from duizhang.graph import make_nodes
+    from tally import llm as llmx
+    from tally.graph import make_nodes
     understand = make_nodes(_MiniCorpus())[0]
     monkeypatch.setattr(llmx, "llm_enabled", lambda: True)
     monkeypatch.setattr(llmx, "chat_json", lambda s, u, **kw: {
@@ -892,7 +892,7 @@ def test_trend_research_sweeps_periods():
 
     class TrendCorpus:
         def __init__(self):
-            from duizhang.schemas import Doc, Retrieved
+            from tally.schemas import Doc, Retrieved
             self.docs = {f"中际旭创_{p}": Doc(f"中际旭创_{p}", "中际旭创",
                                               p, "报告", "x", 10)
                          for p in ("2024Q1", "2024H1", "2025Q1", "2025H1",
@@ -900,7 +900,7 @@ def test_trend_research_sweeps_periods():
             self._R = Retrieved
 
         def search(self, q, k=8, doc_filter="", doc_scope=None):
-            from duizhang.schemas import Chunk
+            from tally.schemas import Chunk
             out = []
             for i, d in enumerate(sorted(doc_scope or [])):
                 out.append(self._R(chunk=Chunk(f"{d}#c", d, 8, 0,
@@ -908,7 +908,7 @@ def test_trend_research_sweeps_periods():
                                    score=0.1, rank=i + 1))
             return out[:k]
 
-    from duizhang.graph import make_nodes
+    from tally.graph import make_nodes
     trend = make_nodes(TrendCorpus())[11]
     st = trend({**new_state("中际旭创最近几个季度营收趋势", "heuristic"),
                 "understanding": {"intent": "trend", "companies": ["中际旭创"],
@@ -927,7 +927,7 @@ class _MiniCorpus:
     """规则理解的假语料：三家公司不同期间。"""
 
     def __init__(self):
-        from duizhang.schemas import Doc
+        from tally.schemas import Doc
         self.docs = {
             "欧科亿_2026Q1": Doc("欧科亿_2026Q1", "欧科亿", "2026Q1", "一季报", "x", 5),
             "欧科亿_2025FY": Doc("欧科亿_2025FY", "欧科亿", "2025FY", "年报", "x", 100),
@@ -938,7 +938,7 @@ class _MiniCorpus:
 def test_rule_understand_multi_company_compare():
     """规则理解：多公司全量命中（替代旧 _doc_filter 只回首个），
     对比词 + 公司≥2 → compare 意图。"""
-    from duizhang.graph import rule_understand
+    from tally.graph import rule_understand
     u = rule_understand("对比欧科亿和海伦哲 2026 一季报的营业收入增长", _MiniCorpus())
     assert u["intent"] == "compare"
     assert set(u["companies"]) == {"欧科亿", "海伦哲"}
@@ -946,7 +946,7 @@ def test_rule_understand_multi_company_compare():
 
 
 def test_rule_understand_single_metric():
-    from duizhang.graph import rule_understand
+    from tally.graph import rule_understand
     u = rule_understand("欧科亿 2026 年半年度预计净利润多少", _MiniCorpus())
     assert u["intent"] == "metric"
     assert u["companies"] == ["欧科亿"]
@@ -955,8 +955,8 @@ def test_rule_understand_single_metric():
 
 def test_understand_node_llm_and_fallback(app, monkeypatch):
     """understand 节点：llm 模式一次结构化抽取；LLM 故障回退规则并留痕。"""
-    from duizhang import llm as llmx
-    from duizhang.graph import make_nodes
+    from tally import llm as llmx
+    from tally.graph import make_nodes
     understand = make_nodes(_MiniCorpus())[0]
     monkeypatch.setattr(llmx, "llm_enabled", lambda: True)
     monkeypatch.setattr(llmx, "chat_json", lambda s, u, **kw: {
@@ -978,8 +978,8 @@ def test_understand_node_llm_and_fallback(app, monkeypatch):
 def test_understand_normalizes_loose_intent(app, monkeypatch):
     """常思模型偶尔回中文意图（glm-5.3 实测「对比营收」）——含对比
     语义且多公司时归一为 compare，不能一律掉到 metric。"""
-    from duizhang import llm as llmx
-    from duizhang.graph import make_nodes
+    from tally import llm as llmx
+    from tally.graph import make_nodes
     understand = make_nodes(_MiniCorpus())[0]
     monkeypatch.setattr(llmx, "llm_enabled", lambda: True)
     monkeypatch.setattr(llmx, "chat_json", lambda s, u, **kw: {
@@ -992,7 +992,7 @@ def test_understand_normalizes_loose_intent(app, monkeypatch):
 def test_route_consumes_understanding():
     """route 纯函数化：消费 understand 的 intent 分发（不再自己调
     LLM/关键词），compare 意图透传；无 understanding 时规则兜底。"""
-    from duizhang.graph import make_nodes
+    from tally.graph import make_nodes
     _understand, route, *_ = make_nodes(_MiniCorpus())
     st = new_state("随便什么query，关键词不该决定路由", "heuristic")
     st = {**st, "understanding": {"intent": "summary", "companies": ["欧科亿"],
@@ -1020,7 +1020,7 @@ def test_retrieve_scopes_from_understanding():
             return []
 
     sc = ScopeCorpus()
-    from duizhang.graph import make_nodes
+    from tally.graph import make_nodes
     _u, _r, retrieve, *_ = make_nodes(sc)
     st = new_state("欧科亿一季度营收", "heuristic")
     st = {**st, "understanding": {"intent": "metric", "companies": ["欧科亿"],
@@ -1032,8 +1032,8 @@ def test_retrieve_scopes_from_understanding():
 def test_compare_decomposes_and_merges_both_companies():
     """compare 多跳：按公司 doc_scope 各自检索、交错合并——两家证据
     都在场；某公司无命中时另一家照常（不空手）。"""
-    from duizhang.graph import build_graph
-    from duizhang.schemas import Chunk, Doc, Retrieved
+    from tally.graph import build_graph
+    from tally.schemas import Chunk, Doc, Retrieved
 
     class DecomposeCorpus:
         def __init__(self):
@@ -1060,7 +1060,7 @@ def test_compare_decomposes_and_merges_both_companies():
 def test_boilerplate_strips_page_number_suffixed_headers():
     """页眉与页码同行（「…2026年第一季度报告 4」）时，逐字比对把每页
     当成不同行，页眉逃过 30% 频率剥离——归一化必须抹掉数字。"""
-    from duizhang.ingest import strip_boilerplate
+    from tally.ingest import strip_boilerplate
     pages = [f"徐州海伦哲专用车辆股份有限公司 2026年第一季度报告 {i}\n营业收入 100\n"
              for i in range(1, 11)]
     out = strip_boilerplate(pages, 10)
@@ -1072,7 +1072,7 @@ class _AgentCorpus:
     """agent 循环的假语料：记录 search 调用，返回固定命中。"""
 
     def __init__(self):
-        from duizhang.schemas import Doc, Retrieved
+        from tally.schemas import Doc, Retrieved
         self.docs = {
             "欧科亿_2026Q1": Doc("欧科亿_2026Q1", "欧科亿", "2026Q1", "一季报", "x", 5),
             "海伦哲_2026Q1": Doc("海伦哲_2026Q1", "海伦哲", "2026Q1", "一季报", "y", 5),
@@ -1081,7 +1081,7 @@ class _AgentCorpus:
         self._R = Retrieved
 
     def search(self, query, k=8, doc_filter="", doc_scope=None):
-        from duizhang.schemas import Chunk
+        from tally.schemas import Chunk
         self.calls.append((query, doc_scope))
         out = []
         for d in (doc_scope or list(self.docs)):
@@ -1095,8 +1095,8 @@ class _AgentCorpus:
 def test_agent_research_loop_bounded_and_fallback(app, monkeypatch):
     """真 Agent 环：模型自主决定调 search、何时收手；步数硬上限 6；
     工具失败/无证据回退固定检索管线（不空手）。"""
-    from duizhang import llm as llmx
-    from duizhang.graph import make_nodes
+    from tally import llm as llmx
+    from tally.graph import make_nodes
     nodes = make_nodes(_AgentCorpus())
     agent = nodes[10]
     monkeypatch.setattr(llmx, "llm_enabled", lambda: True)
@@ -1192,8 +1192,8 @@ def test_agent_research_loop_bounded_and_fallback(app, monkeypatch):
 def test_understand_period_backfill_from_rule(app, monkeypatch):
     """小模型抽 period 时灵时不灵（实测空串→检索不限期间→年报块淹没）：
     空值时从规则确定性匹配回填——与公司名纠偏对称。"""
-    from duizhang import llm as llmx
-    from duizhang.graph import make_nodes
+    from tally import llm as llmx
+    from tally.graph import make_nodes
     understand = make_nodes(_MiniCorpus())[0]
     monkeypatch.setattr(llmx, "llm_enabled", lambda: True)
     monkeypatch.setattr(llmx, "chat_json", lambda s, u, **kw: {
@@ -1237,7 +1237,7 @@ def test_summarize_keylines_from_retrieval_not_head():
 
     class SummaryCorpus:
         def __init__(self):
-            from duizhang.schemas import Doc
+            from tally.schemas import Doc
             self.docs = {
                 "中际旭创_2024FY": Doc("中际旭创_2024FY", "中际旭创",
                                        "2024FY", "年报", "x", 236),
@@ -1245,7 +1245,7 @@ def test_summarize_keylines_from_retrieval_not_head():
                                        "2025FY", "年报", "x", 229)}
 
         def search(self, q, k=6, doc_filter="", doc_scope=None):
-            from duizhang.schemas import Chunk, Retrieved
+            from tally.schemas import Chunk, Retrieved
             scope = doc_scope or set()
             if any("2025FY" in d for d in scope):
                 return [Retrieved(chunk=Chunk(
@@ -1261,11 +1261,11 @@ def test_summarize_keylines_from_retrieval_not_head():
             return []
 
         def chunks_of(self, doc_id, limit=12):
-            from duizhang.schemas import Chunk
+            from tally.schemas import Chunk
             return [Chunk(f"h{i}", doc_id, 1, i, "董事 杜某 2013 年 3 月")
                     for i in range(12)]          # 头部全是名录
 
-    from duizhang.graph import make_nodes
+    from tally.graph import make_nodes
     summarize = make_nodes(SummaryCorpus())[7]
     st = summarize({**new_state("总结一下中际旭创 2025 年报", "heuristic"),
                     "understanding": {"intent": "summary",
@@ -1290,7 +1290,7 @@ def test_corrective_loop_bounded(app):
 def test_eval_judge_expect_docs():
     """对比题判定：expect_docs 列表里的每个期望文档都要在 hits 或
     citations 中出现——只中一家不算过。"""
-    from duizhang.evalx import judge
+    from tally.evalx import judge
     case = {"q": "对比", "expect_keywords": ["k"], "expect_docs": ["欧科亿_2026Q1", "海伦哲_2026Q1"]}
     both = {"answer": "k", "citations": [],
             "hits": [_hit("a", "欧科亿_2026Q1", 1, 0, "k", 1),
@@ -1304,7 +1304,7 @@ def test_eval_judge_expect_docs():
 def test_coverage_evidence_includes_num_notes():
     """LLM 常用数字注释的表述作答（6.44亿）而非原文数字（644,051,473.82），
     证据池必须包含 num_notes——与 grade/extractive 的口径一致。"""
-    from duizhang.answer import citation_coverage
+    from tally.answer import citation_coverage
     h = _hit("n1", "欧科亿_2026Q1", 11, 0,
              "一、营业总收入 644,051,473.82 301,672,910.35", 1)
     h.chunk.num_notes = ["≈6.44亿"]
@@ -1316,7 +1316,7 @@ def test_coverage_grades_numeric_sentences_only():
     """LLM 的对比答案含框架句（「根据提供的证据…如下」「因此…」）——
     财报问答的编造风险集中在数字句，框架句不该拉低覆盖率均值；
     全答案无数字句时回退全句考核（摘要类）。"""
-    from duizhang.answer import citation_coverage
+    from tally.answer import citation_coverage
     h1 = _hit("a", "欧科亿_2026Q1", 11, 0,
               "一、营业总收入 644,051,473.82 301,672,910.35", 1)
     h2 = _hit("b", "海伦哲_2026Q1", 10, 0,
@@ -1334,8 +1334,8 @@ def test_coverage_grades_numeric_sentences_only():
 def test_llm_fallback_visible_in_trace(app, monkeypatch):
     """LLM 决策点故障：静默降级到规则（图不变），但 trace 必须留痕——
     否则 --mode llm 演示失败时无法察觉，还以为是规则在回答。"""
-    from duizhang import graph as _g  # noqa: F401  确认可导入
-    from duizhang import llm as llmx
+    from tally import graph as _g  # noqa: F401  确认可导入
+    from tally import llm as llmx
 
     def boom(system, user, **kw):
         raise RuntimeError("llm down")
@@ -1352,7 +1352,7 @@ def test_eval_judge_requires_doc_hit():
     """评估口径：非拒答题的 ✓ 必须同时要求「关键词命中」与「检索命中」，
     否则逐题 ✓ 与 retrieval@3 汇总对不上。summary 路由不填 hits 但填
     citations——判定两条通道都要认。"""
-    from duizhang.evalx import judge
+    from tally.evalx import judge
     case = {"q": "x", "expect_keywords": ["k"], "expect_doc": "d1"}
     # 关键词中了，但检索既无 hits 也无 citations → 不算过
     assert judge(case, {"answer": "k", "hits": [], "citations": [],
@@ -1371,7 +1371,7 @@ def test_eval_judge_requires_doc_hit():
 
 
 def test_eval_dataset_passes_thresholds(corpus):
-    from duizhang.evalx import run_eval
+    from tally.evalx import run_eval
     s = run_eval(corpus, mode="heuristic", verbose=False)
     assert s["answer_hit"] >= 0.9
     assert s["refusal"] == 1.0
@@ -1382,9 +1382,9 @@ def test_fts_search_fuses_extra_vector_ranking(tmp_path):
     """P1.2 三路 RRF：extra_ranking（向量路）作为第三排名列表进 RRF。
     动机场景：口语「归母净资产」与报表「归属于母公司所有者权益」
     零词面重叠，双轨 FTS 全 miss——向量语义命中由第三路补位。"""
-    from duizhang import fts
-    from duizhang.schemas import Chunk, Doc
-    from duizhang.store import Store
+    from tally import fts
+    from tally.schemas import Chunk, Doc
+    from tally.store import Store
     s = Store(tmp_path / "v.db")
     s.add_doc(Doc("测试司_2025Q1", "测试司", "2025Q1", "一季报", "x", 1),
               [Chunk("测试司_2025Q1#p1#0", "测试司_2025Q1", 1, 0,
@@ -1406,7 +1406,7 @@ def test_quarter_view_unified_series():
     差分）、Q4=FY−三季报累计——每季一行（营收+归母同列），取最近 n 季。
     用户实测「近4个季度」此前给的是报告期混合口径（单季/半年累计/前三
     季累计混排），日历季度序列在数据层不存在。"""
-    from duizhang.graph import _quarter_view
+    from tally.graph import _quarter_view
 
     def _e(doc_id, tag, rows):
         period = doc_id.rsplit("_", 1)[-1]
@@ -1440,7 +1440,7 @@ def test_quarter_n_parse():
     """「近N个季度」信号解析：带数字才进单季视图；「最近几个季度/
     近几年」保持报告期视图（innolight/多轮既有题的关键词锚在 as-reported
     值上，无数字切换会整体回退）。"""
-    from duizhang.graph import _quarter_n
+    from tally.graph import _quarter_n
     assert _quarter_n("近4个季度的营收趋势") == 4
     assert _quarter_n("最近3季怎么样") == 3
     assert _quarter_n("近 2 个季度") == 2
@@ -1453,7 +1453,7 @@ def test_direction_gate_second_order_pass():
     增长率）判为二阶——「增速回落」是速率事实且与同比正号相容（146%→37%
     指标仍涨），此前被当一阶词误杀，glm-5.3 的正确方向叙述整段被毙退
     骨架（用户实测 trace: direction-gate(回落…)）。裸「回落」仍拦。"""
-    from duizhang.graph import direction_gate
+    from tally.graph import direction_gate
     sk = "· X_2025Q1（单季）：营收 66.7 亿（同比 37.82%）；归母净利 15.8 亿（同比 56.83%）"
     assert direction_gate("同比从 146% 降至 37%，营收增速回落", sk) is None
     assert direction_gate("营收增长稳健", sk) is None
@@ -1466,7 +1466,7 @@ def test_ingest_file_rejects_zero_chunk_pdf(tmp_path):
     指纹锁死，永不重试；库里留一具检索不可见、问答永空手的空壳。"""
     from pypdf import PdfWriter
 
-    from duizhang.ingest import ingest_file
+    from tally.ingest import ingest_file
     w = PdfWriter()
     for _ in range(3):
         w.add_blank_page(width=595, height=842)   # A4（空 writer 需显式尺寸）
@@ -1481,8 +1481,8 @@ def test_plan_node_replay_whitelist_and_gaps(corpus, monkeypatch):
     """plan 节点 LLM 回放（v0.7 白盒不变量；此前只有 _validate_plan 单测
     与结构冒烟，规划路径的假回放缺失）：白名单外动作只删不造、检查点
     失败的子目标显式进 plan_gaps（不静默吞缺口）、有效子目标证据落池。"""
-    import duizhang.llm as llmx
-    from duizhang.graph import make_nodes
+    import tally.llm as llmx
+    from tally.graph import make_nodes
     plan = make_nodes(corpus)[13]
     monkeypatch.setattr(llmx, "llm_enabled", lambda: True)
     replies = iter([
@@ -1509,8 +1509,8 @@ def test_plan_node_replay_whitelist_and_gaps(corpus, monkeypatch):
 def test_plan_node_garbage_output_falls_back(corpus, monkeypatch):
     """规划器输出不可解析（subgoals 非列表）→ 整体回退 agent 环标记，
     不带半成品状态继续走。"""
-    import duizhang.llm as llmx
-    from duizhang.graph import make_nodes
+    import tally.llm as llmx
+    from tally.graph import make_nodes
     plan = make_nodes(corpus)[13]
     monkeypatch.setattr(llmx, "llm_enabled", lambda: True)
     monkeypatch.setattr(llmx, "chat_json",
@@ -1523,7 +1523,7 @@ def test_plan_node_garbage_output_falls_back(corpus, monkeypatch):
 def test_verify_declares_plan_gaps_not_silent(corpus):
     """部分答案红线（v0.7 Phase 2）：verify:pass 的答案若带着未完成
     子目标，出口必须追加「未覆盖」声明——不允许静默吞掉缺口。"""
-    from duizhang.graph import make_nodes
+    from tally.graph import make_nodes
     verify = make_nodes(corpus)[9]
     h = _hit("g1", "欧科亿_2026H1E", 1, 0,
              "预计 2026 年半年度净利润 41,922.46 万元。", 1)

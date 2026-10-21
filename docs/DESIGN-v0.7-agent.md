@@ -4,7 +4,7 @@
 |---|---|
 | 状态 | **已实施并全量验收（2026-10-20）**——四支柱全部落地：Phase 1 步级观测（agent_steps 四元组+耗时，eval steps 出口 waste_rate）；Phase 2 Planner（plan 节点+只删不造校验+检查点）；Phase 3 Memory 三层（L0 轮压缩继承含年份、L1 台账五算子+写闸读不豁免+指纹失效、L2 alias）；Phase 4 工具注册表+derive 差分（原币精度+年份隔离+出口重算）。验收：pytest 130 绿（含 test_v07.py 27 例）、ruff 净、heuristic 七集全 1.00（default/agent/innolight/maotai/quarters/multihop/multiturn）|
 | 前置 | v0.6.5（D26 修复 / 方向闸 / trend LLM 默认在环 / 裁判自测）已验收 |
-| 目标 | 把 duizhang 从「Agentic RAG 问答引擎」升级为**封闭世界约束下的完整 Agent 系统**：Planning / Memory / Tool Use / ReAct 四支柱齐备，每一支柱都不破坏「每个答案都能对账」的底线；并在拉长任务链（多子目标/多轮/跨会话记忆）的同时保住长程可靠性——P(错误答案) ≤ Σeₖ·gₖ（§3） |
+| 目标 | 把 tally 从「Agentic RAG 问答引擎」升级为**封闭世界约束下的完整 Agent 系统**：Planning / Memory / Tool Use / ReAct 四支柱齐备，每一支柱都不破坏「每个答案都能对账」的底线；并在拉长任务链（多子目标/多轮/跨会话记忆）的同时保住长程可靠性——P(错误答案) ≤ Σeₖ·gₖ（§3） |
 
 ---
 
@@ -16,7 +16,7 @@
 系统的**正确形态**：封闭世界（closed-world）让「对账」成为可判定
 的问题——开放世界里 verify 永远证伪不了「模型碰巧知道」。
 
-这个定位下，duizhang 的 Agent 性不是「能调多少外部工具」，而是
+这个定位下，tally 的 Agent 性不是「能调多少外部工具」，而是
 **在严格证据边界内把自主性做深**：自主规划检索、自主反思修正、
 自主判断收手——同时每一步都可被确定性代码否决。
 
@@ -384,7 +384,7 @@ else → trace memory:miss，全流程（成功则回写）
 
 ### 7.6 L2：固定语义资产 + 可选的离线预填
 
-**L2 内容**（`duizhang/assets/semantic_assets.json`，git 版本化）：
+**L2 内容**（`tally/assets/semantic_assets.json`，git 版本化）：
 
 - `alias`：公司简称↔全称（把 D20 的硬编码归一表外置为数据）
 - `caliber_lexicon`：口径变体词典（营业收入↔营业总收入、扣非全名…，
@@ -413,7 +413,7 @@ doc 跑一遍过闸抽取预填 L1（Letta sleep-time compute 的语料版）。
 
 ### 7.8 隔离与开关
 
-- `DZ_MEMORY`（默认 on；off=完全旁路，行为=v0.6.5）。
+- `TALLY_MEMORY`（默认 on；off=完全旁路，行为=v0.6.5）。
 - **eval 默认隔离台账**（evalx 每轮清空或绕过读路径）：否则第 N 题
   命中第 1 题的缓存，把「检索能力」测成「记忆能力」。memory 专项
   评测显式开：指标=命中率、一致性、**加速比**。
@@ -444,7 +444,7 @@ doc 跑一遍过闸抽取预填 L1（Letta sleep-time compute 的语料版）。
 > Ollama，用 .env 远端档位（智谱 GLM Coding Plan / glm-5.3）先跑
 > gₖ 侧；eₖ 步级表需要本地通道（见 8.1 发现），如实标注待测。
 
-### 8.1 汇总（agent 集 8 题，DZ_MEMORY=off，与 eval 隔离口径一致）
+### 8.1 汇总（agent 集 8 题，TALLY_MEMORY=off，与 eval 隔离口径一致）
 
 | 观测 | 值 | 说明 |
 |---|---|---|
@@ -474,3 +474,12 @@ eₖ 逐步表以本地通道为准另行产出。
 | 6 | 总结欧科亿半年度业绩预告 | pass | — | 4.1s | summary |
 | 7 | 欧科亿 2030 年净利润预测 | refused | — | 9.8s | period-guard→refuse |
 | 8 | 今天北京天气怎么样 | refused | — | 3.0s | other→refuse |
+
+---
+
+**命名注记（2026-10-21）**：项目由「对账 duizhang」更名为 **Tally**
+（repo `tally`，词源：符木刻痕劈两半、两半对上才算数）；环境变量
+`DZ_*` 全量迁移为 `TALLY_*`，默认库 `duizhang.db → tally.db`。本档
+历史行文中的 `duizhang`/`DZ_*` 已同步更名以保命令可复现；「对账」
+作为概念词保留。重命名与《动手学 Agent RAG》教程全案见
+`docs/plans/2026-10-21-tally-tutorial-design.md`。

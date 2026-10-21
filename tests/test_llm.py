@@ -3,19 +3,19 @@
 
 import pytest
 
-from duizhang import llm
+from tally import llm
 
 
 def test_load_dotenv_reads_and_does_not_override(tmp_path):
     """KEY=VALUE 逐行装载；已存在的环境变量不覆盖（env 优先于 .env）。"""
     env_file = tmp_path / ".env"
     env_file.write_text(
-        'DZ_LLM_API_KEY="key123"\nDZ_LLM_MODEL=qwen3.5:0.8b\n'
+        'TALLY_LLM_API_KEY="key123"\nTALLY_LLM_MODEL=qwen3.5:0.8b\n'
         "# 注释行\nBADLINE 无等号\n\n", encoding="utf-8")
-    env: dict[str, str] = {"DZ_LLM_MODEL": "qwen3:0.6b"}   # 已存在
+    env: dict[str, str] = {"TALLY_LLM_MODEL": "qwen3:0.6b"}   # 已存在
     llm._load_dotenv(env_file, env=env)
-    assert env["DZ_LLM_API_KEY"] == "key123"
-    assert env["DZ_LLM_MODEL"] == "qwen3:0.6b"       # 未被 .env 覆盖
+    assert env["TALLY_LLM_API_KEY"] == "key123"
+    assert env["TALLY_LLM_MODEL"] == "qwen3:0.6b"       # 未被 .env 覆盖
 
 
 def test_local_defaults():
@@ -26,19 +26,19 @@ def test_local_defaults():
 
 def test_llm_enabled_local_without_key(monkeypatch):
     """本地端点免鉴权：无 key 也启用；远端端点仍需 key。"""
-    monkeypatch.delenv("DZ_LLM_API_KEY", raising=False)
-    monkeypatch.delenv("DZ_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("TALLY_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("TALLY_LLM_BASE_URL", raising=False)
     assert llm.llm_enabled() is True            # 默认即本地 Ollama
-    monkeypatch.setenv("DZ_LLM_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setenv("TALLY_LLM_BASE_URL", "https://api.deepseek.com/v1")
     assert llm.llm_enabled() is False           # 远端无 key 不启用
-    monkeypatch.setenv("DZ_LLM_API_KEY", "sk-x")
+    monkeypatch.setenv("TALLY_LLM_API_KEY", "sk-x")
     assert llm.llm_enabled() is True
 
 
 def test_local_chat_uses_native_api(monkeypatch):
     """本地通道走 Ollama 原生 /api/chat（OpenAI 兼容端点忽略 think 参数、
     思考会吃光 max_tokens 致正文为空——实测）。think 默认关：本地结构化
-    调用要速度；DZ_LLM_THINKING=enabled 打开。"""
+    调用要速度；TALLY_LLM_THINKING=enabled 打开。"""
 
     captured = {}
 
@@ -47,11 +47,11 @@ def test_local_chat_uses_native_api(monkeypatch):
         return {"message": {"content": '```json\n{"ok": 1}\n```', "thinking": "x"}}
 
     monkeypatch.setattr(llm, "_http_post_json", fake_post)
-    monkeypatch.setenv("DZ_LLM_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setenv("TALLY_LLM_BASE_URL", "http://localhost:11434/v1")
     assert llm.chat_json("sys", "user") == {"ok": 1}
     assert captured["url"].endswith("/api/chat")          # 原生端点
     assert captured["payload"]["think"] is False          # 默认关思考
-    monkeypatch.setenv("DZ_LLM_THINKING", "enabled")
+    monkeypatch.setenv("TALLY_LLM_THINKING", "enabled")
     llm.chat_text("sys", "user")
     assert captured["payload"]["think"] is True           # 显式打开
 
@@ -94,7 +94,7 @@ def test_anthropic_protocol_detection_and_dispatch(monkeypatch):
             def create(**kw):
                 return _Resp()
 
-    monkeypatch.setenv("DZ_LLM_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
+    monkeypatch.setenv("TALLY_LLM_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
     fa = _FakeAnthropic()
     monkeypatch.setattr(llm, "_client_anthropic", lambda: fa)
     assert llm.chat_json("sys", "user") == {"ok": True}   # 围栏 JSON 也解析
@@ -114,7 +114,7 @@ def test_chat_with_tools_local_native(monkeypatch):
             "function": {"name": "search", "arguments": {"query": "营收"}}}]}}
 
     monkeypatch.setattr(llm, "_http_post_json", fake_post)
-    monkeypatch.setenv("DZ_LLM_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setenv("TALLY_LLM_BASE_URL", "http://localhost:11434/v1")
     out = llm.chat_with_tools(
         [{"role": "user", "content": "q"}],
         tools=[{"type": "function", "function": {"name": "search",
@@ -128,17 +128,17 @@ def test_chat_with_tools_local_native(monkeypatch):
     monkeypatch.setattr(llm, "_http_post_json", fake_post2)
     out2 = llm.chat_with_tools([{"role": "user", "content": "q"}], tools=[])
     assert out2 == {"content": "最终答案", "tool_calls": []}
-    monkeypatch.setenv("DZ_LLM_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
+    monkeypatch.setenv("TALLY_LLM_BASE_URL", "https://open.bigmodel.cn/api/anthropic")
     assert llm._use_anthropic() is True
-    monkeypatch.setenv("DZ_LLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/")
+    monkeypatch.setenv("TALLY_LLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/")
     assert llm._use_anthropic() is False
 
 
 def test_auto_mode_resolution(monkeypatch):
     """mode=auto：有 key 走 llm（LLM 是大脑），无 key 走 heuristic（兜底），
     trace 记录解析结果；显式模式原样通过。"""
-    from duizhang.schemas import new_state
-    monkeypatch.delenv("DZ_LLM_API_KEY", raising=False)
+    from tally.schemas import new_state
+    monkeypatch.delenv("TALLY_LLM_API_KEY", raising=False)
     st = new_state("q", "auto")
     assert st["mode"] == "heuristic"
     assert any("mode:heuristic" in t for t in st["trace"])

@@ -3,7 +3,7 @@
 三路 RRF 的向量路：词法双轨对「口语 vs 报表术语」零词面重叠（归母
 净资产 vs 归属于母公司所有者权益合计）无能为力，语义嵌入补位——
 但消融实测（2026-10-19，31 题真值集）它在数字/口径精确任务上净负
-贡献，故默认关闭：DZ_VEC=on 显式 opt-in（见 enabled 注释）。
+贡献，故默认关闭：TALLY_VEC=on 显式 opt-in（见 enabled 注释）。
 可选依赖纪律：未装 fastembed / 未 opt-in / 库未嵌入（vecmeta 未
 绑定或模型不符）→ ranking 返回 None，fts.search 退回双轨行为，
 CI 无此依赖照常全绿。安装：pip install -r requirements-vec.txt。
@@ -33,14 +33,14 @@ def installed() -> bool:
 
 
 def enabled() -> bool:
-    """查询路是否启用：显式 DZ_VEC=on（opt-in）且依赖在。
+    """查询路是否启用：显式 TALLY_VEC=on（opt-in）且依赖在。
 
     默认关闭是消融定的（2026-10-19，31 题真值集）：财报数字/口径
     精确任务上词法双轨已饱和（answer_hit 1.00×3 数据集），向量第三路
     把语义相近但口径不同的块拉近、挤掉精确命中——0.875/0.833/0.926。
     语义问法场景（为什么/怎么样）再显式开启实验。
     """
-    return os.environ.get("DZ_VEC") == "on" and installed()
+    return os.environ.get("TALLY_VEC") == "on" and installed()
 
 
 def _get():
@@ -79,7 +79,7 @@ def ranking(con, docs: dict, query: str, doc_filter: str,
     row = con.execute("SELECT model FROM vecmeta LIMIT 1").fetchone()
     if not row or row[0] != MODEL:
         return None
-    from duizhang import fts
+    from tally import fts
     allow = fts.allow_ids(docs, doc_filter, doc_scope)
     if allow == []:
         return None

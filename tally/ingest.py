@@ -17,7 +17,7 @@ from pathlib import Path
 
 from pypdf import PdfReader
 
-from duizhang.schemas import Chunk, Doc
+from tally.schemas import Chunk, Doc
 
 # 研报：20260703-东吴证券-并行科技-920493-标题.pdf → (券商, 日期, 研报)
 _REPORT_PAT = re.compile(r"^(\d{8})-([^-]+)-(.+)\.pdf$")

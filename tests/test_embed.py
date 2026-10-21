@@ -23,10 +23,10 @@ class _FakeEmbed:
 
 
 def test_embed_blobs_and_query_ranking(tmp_path, monkeypatch):
-    monkeypatch.setenv("DZ_VEC", "on")      # 查询路 opt-in（默认关）
-    from duizhang import embed
-    from duizhang.schemas import Chunk, Doc
-    from duizhang.store import Store
+    monkeypatch.setenv("TALLY_VEC", "on")      # 查询路 opt-in（默认关）
+    from tally import embed
+    from tally.schemas import Chunk, Doc
+    from tally.store import Store
     monkeypatch.setattr(embed, "_get", _FakeEmbed)   # 封网：不下载真模型
     assert embed.enabled()
     # 嵌入产出 float32 blob（512 维 × 4 字节）
@@ -64,26 +64,26 @@ def test_embed_blobs_and_query_ranking(tmp_path, monkeypatch):
 def test_vec_default_off_opt_in_on(tmp_path):
     """消融定默认（P1.2）：财报数字/口径题上词法双轨饱和 1.00，向量
     第三路 answer_hit 掉到 0.875/0.833/0.926——语义泛化把口径不同
-    的块拉近挤掉精确命中。故默认关闭，DZ_VEC=on 显式 opt-in；
+    的块拉近挤掉精确命中。故默认关闭，TALLY_VEC=on 显式 opt-in；
     installed()（依赖在否）与 enabled()（查询路开关）分离，
     CLI embed 只看前者（建索引不要求运行时开关）。"""
     import os
 
-    from duizhang import embed
-    from duizhang.store import Store
+    from tally import embed
+    from tally.store import Store
     s = Store(tmp_path / "v.db")
     s.set_vec_model(embed.MODEL)
-    old = os.environ.get("DZ_VEC")
+    old = os.environ.get("TALLY_VEC")
     try:
-        os.environ.pop("DZ_VEC", None)
+        os.environ.pop("TALLY_VEC", None)
         assert embed.installed() is True      # 依赖在（本机装了 fastembed）
         assert embed.enabled() is False       # 默认关
         assert embed.ranking(s.con, {}, "x", "", None) is None
-        os.environ["DZ_VEC"] = "on"
+        os.environ["TALLY_VEC"] = "on"
         assert embed.enabled() is True
     finally:
         if old is None:
-            os.environ.pop("DZ_VEC", None)
+            os.environ.pop("TALLY_VEC", None)
         else:
-            os.environ["DZ_VEC"] = old
+            os.environ["TALLY_VEC"] = old
     s.close()

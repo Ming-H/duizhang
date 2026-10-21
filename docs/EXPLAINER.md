@@ -1,4 +1,4 @@
-# 对账 duizhang：一个财报 RAG 的设计与踩坑实录
+# Tally：一个财报 RAG 的设计与踩坑实录
 
 > 面向想理解「为什么这样设计」的读者。结构借鉴 Google design doc 的
 > 决策记录（每条含备选与否决理由）、Meta 工程博客的事故复盘叙事、
@@ -15,9 +15,9 @@
 ```
 # 30 秒复现（零 API key）
 pip install -r requirements.txt
-python -m duizhang.cli ingest samples/
-python -m duizhang.cli ask "欧科亿 2026 年半年度预计净利润多少"
-python -m duizhang.cli eval
+python -m tally.cli ingest samples/
+python -m tally.cli ask "欧科亿 2026 年半年度预计净利润多少"
+python -m tally.cli eval
 ```
 
 ## 〇、定位：workflow → Agentic RAG 的取舍
@@ -159,9 +159,9 @@ PRAGMA（mmap + 200MB 页缓存）与「两轨轻列、正文延迟取」两个�
 ### P3 测试清库：共享状态的代价
 
 **现象**：跑了一次 pytest，60.7 万块的真实语料库被清空。
-**根因**：CLI 测试用相对路径 `duizhang.db`，测试进程的孤儿清理逻辑
+**根因**：CLI 测试用相对路径 `tally.db`，测试进程的孤儿清理逻辑
 把真实库的全部文档判为「测试范围外的孤儿」删除。
-**修复**：`DZ_DB` 环境变量隔离测试数据库；测试走 tmp_path。
+**修复**：`TALLY_DB` 环境变量隔离测试数据库；测试走 tmp_path。
 **通用教训**：**任何会写持久状态的代码，测试必须显式隔离存储位置**；
 「默认路径」在测试语境里就是共享全局变量。
 
@@ -197,7 +197,7 @@ PRAGMA（mmap + 200MB 页缓存）与「两轨轻列、正文延迟取」两个�
 ## 六、仓库地图
 
 ```
-duizhang/
+tally/
 ├── schemas.py   数据模型 + GraphState（窄接口契约）
 ├── source.py    扫描与三态 diff（增量账本的眼睛；SHA-256 内容哈希指纹）
 ├── ingest.py    文件名元数据/表格分块/页眉剥离/数字归一化/查询扩展

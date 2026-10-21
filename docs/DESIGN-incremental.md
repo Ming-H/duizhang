@@ -38,7 +38,7 @@ CREATE TABLE manifest (
 
 ## 4. 模块设计
 
-### 4.1 `duizhang/source.py`（新）：语料扫描与 diff
+### 4.1 `tally/source.py`（新）：语料扫描与 diff
 
 - `scan(root, exclude=("0 分析结果",))` → `{path: fingerprint}`，后缀白名单 `pdf/md/txt`，
   跳过 `.DS_Store/csv/png/html`（数据工件非正文）。
@@ -65,9 +65,9 @@ TXT 一等支持（`美迪西2026中报.txt` 类裸文本：kind=文本，compan
 ### 4.4 `cli.py`：增量成为默认
 
 ```
-python -m duizhang.cli ingest data/corpus     # 增量：diff → 增/改/删 → 落库 → 索引缓存失效
-python -m duizhang.cli ingest --rebuild       # 全量重建（破坏性，先清库）
-python -m duizhang.cli ingest --watch         # 轮询 60s 循环增量（零依赖）
+python -m tally.cli ingest data/corpus     # 增量：diff → 增/改/删 → 落库 → 索引缓存失效
+python -m tally.cli ingest --rebuild       # 全量重建（破坏性，先清库）
+python -m tally.cli ingest --watch         # 轮询 60s 循环增量（零依赖）
 ```
 
 删除路径：`to_delete` 的 doc 从 docs/chunks/manifest 三表清除。

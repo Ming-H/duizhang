@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from duizhang.index import Corpus
-from duizhang.ingest import ingest_file
-from duizhang.store import Store
+from tally.index import Corpus
+from tally.ingest import ingest_file
+from tally.store import Store
 
 SAMPLES = Path(__file__).resolve().parents[1] / "samples"
 PDF = SAMPLES / "欧科亿_2026年半年度业绩预告.pdf"

@@ -1,7 +1,7 @@
 venv/
 __pycache__/
 *.pyc
-duizhang.db
+tally.db
 .pytest_cache/
 .ruff_cache/
 .DS_Store
@@ -10,8 +10,8 @@ data/*
 !data/中际旭创/
 !data/贵州茅台/
 *.idx.pkl
-duizhang.db-wal
-duizhang.db-shm
+tally.db-wal
+tally.db-shm
 .env
 
 test_reports/

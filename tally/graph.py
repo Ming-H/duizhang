@@ -39,12 +39,12 @@ import re
 
 from langgraph.graph import END, START, StateGraph
 
-from duizhang import answer as ans
-from duizhang import llm as llmx
-from duizhang import memory as mem
-from duizhang.index import Corpus, word_tokens
-from duizhang.ingest import expand_query
-from duizhang.schemas import GraphState
+from tally import answer as ans
+from tally import llm as llmx
+from tally import memory as mem
+from tally.index import Corpus, word_tokens
+from tally.ingest import expand_query
+from tally.schemas import GraphState
 
 MAX_RETRIES = 1
 TOP_K = 8
@@ -182,7 +182,7 @@ def stitch_adjacent(hits, corpus=None) -> list:
     （1,582,876,128.67 顶掉 1,568,385,287.19）。命中块与同页相邻块
     在页内 seq 序上互补（一侧纯标签、一侧纯数值）时拼成整行再进生成。
     完整行不受影响；无 chunks_page 能力时原样返回。"""
-    from duizhang.schemas import Retrieved as _R
+    from tally.schemas import Retrieved as _R
     get_page = getattr(corpus, "chunks_page", None) if corpus else None
     if not get_page:
         return list(hits)
@@ -216,7 +216,7 @@ def stitch_adjacent(hits, corpus=None) -> list:
                 if (_is_label(ch.text) and _is_bare_nums(nb.text)) or \
                         (_is_bare_nums(ch.text) and _is_label(nb.text)):
                     label, nums = (ch, nb) if _is_label(ch.text) else (nb, ch)
-                    from duizhang.schemas import Chunk as _C
+                    from tally.schemas import Chunk as _C
                     new_chunk = _C(
                         chunk_id=f"{label.chunk_id}~{nums.chunk_id}",
                         doc_id=label.doc_id, page=label.page, seq=label.seq,
@@ -260,7 +260,7 @@ def front_key_table(hits, u, query, corpus, cap: int = _FRONT_CAP) -> list:
              and (not years or doc.period[:4] in years)} or None
     probe = corpus.search("主要会计数据", k=2, doc_filter=comp0,
                           doc_scope=scope)
-    from duizhang.schemas import Retrieved
+    from tally.schemas import Retrieved
     key_page_chunks: list = []
     get_page = getattr(corpus, "chunks_page", None)
     if probe and get_page:
@@ -859,9 +859,9 @@ def _self_check(query: str, skeleton: str, narration: str) -> dict | None:
     **非对称信任**：裁判只能否决/降级，永不解锁——确定性双闸先于裁判
     跑（裁判全绿 ≠ 豁免闸门），裁判说不行 → 剥句/有界修复/退骨架。
     拿不准判 true：误杀的代价是体验退回骨架（保守失败），误放的代价
-    是错误出门（不可逆）。DZ_SELF_CHECK=off 关闭（延迟敏感场景）；
+    是错误出门（不可逆）。TALLY_SELF_CHECK=off 关闭（延迟敏感场景）；
     裁判异常 → None 不拦叙述（裁判失灵不等于叙述有错，双闸仍在）。"""
-    if os.environ.get("DZ_SELF_CHECK", "").strip().lower() == "off":
+    if os.environ.get("TALLY_SELF_CHECK", "").strip().lower() == "off":
         return None
     try:
         return llmx.chat_json(
@@ -1338,10 +1338,10 @@ def make_nodes(corpus: Corpus):
             # LLM 默认在环（v0.6.5）：叙述层默认开——数字闸+方向闸双闸
             # 兜底后叙述风险被架构封住（违例→退骨架=改前行为，保守失败）。
             # 此前默认关是因为小模型把 +90.05% 说成「大幅回落」且无机械
-            # 闸可拦；方向闸补上这一维后默认值翻转。DZ_TREND_ANALYSIS：
+            # 闸可拦；方向闸补上这一维后默认值翻转。TALLY_TREND_ANALYSIS：
             # 未设=归纳叙述（默认）；enabled=加深度投资分析；off=骨架
             # 直出（逃生门，延迟敏感场景）。
-            tier = os.environ.get("DZ_TREND_ANALYSIS", "").strip().lower()
+            tier = os.environ.get("TALLY_TREND_ANALYSIS", "").strip().lower()
             deep = tier == "enabled"
             if (state["mode"] == "llm" and llmx.llm_enabled() and tier != "off"):
                 # 单季统一视图（v0.6.6）：各行为日历单季（派生行已标注），
@@ -1455,7 +1455,7 @@ def make_nodes(corpus: Corpus):
             # 个文档——单季视图 4 行引用的文档大多没有合成块入池，覆盖
             # 率 0.102 整体误降级（实测）；页取该档首个命中块，与行内
             # 引用同页，保证 citation_in 命中入池
-            from duizhang.schemas import Chunk as _C
+            from tally.schemas import Chunk as _C
             sk_seen: set[str] = set()
             for h in hits:
                 did = h.chunk.doc_id
@@ -2266,7 +2266,7 @@ def build_graph(corpus: Corpus):
 
     g.add_edge(START, "understand")
     # v0.7：understand 与 route 之间插 L1 探针——命中即终答（内联过
-    # verify），未命中零开销透传。eval 隔离（DZ_MEMORY=off）时恒透传
+    # verify），未命中零开销透传。eval 隔离（TALLY_MEMORY=off）时恒透传
     g.add_edge("understand", "memory_probe")
 
     def after_memory(state: GraphState) -> str:
@@ -2345,7 +2345,7 @@ def ask(corpus: Corpus, query: str, mode: str = "auto",
     app = build_graph(corpus)
     import time
 
-    from duizhang.schemas import new_state
+    from tally.schemas import new_state
     st: GraphState | None = None
     marks: list[float] = []
     t0 = time.perf_counter()

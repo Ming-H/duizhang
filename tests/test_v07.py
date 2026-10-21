@@ -21,9 +21,9 @@ import sqlite3
 
 import pytest
 
-from duizhang import memory as mem
-from duizhang.answer import split_fix
-from duizhang.graph import (
+from tally import memory as mem
+from tally.answer import split_fix
+from tally.graph import (
     AGENT_TOOLS,
     MAX_SUBGOALS,
     _ckpt_ok,
@@ -38,7 +38,7 @@ from duizhang.graph import (
     metric_rows,
     trend_rows,
 )
-from duizhang.schemas import Chunk, Retrieved, new_state
+from tally.schemas import Chunk, Retrieved, new_state
 
 
 def _hit(chunk_id, doc_id, page, seq, text, rank=0):
@@ -58,7 +58,7 @@ def _ch(chunk_id, doc_id, page, seq, text):
 def test_steps_summary_waste_rate():
     """waste_rate = (dup+empty)/gates——eₖ 的可测代理。混合 gate 分布
     手算对齐，防口径漂移。"""
-    from duizhang.evalx import summarize
+    from tally.evalx import summarize
     rows = [{"kw_hit": True, "doc_hit": True, "expect_refused": False,
              "refused": False, "top1": "d"}] * 2
     gates = [("new", 60), ("dup", 20), ("empty", 20), ("new", 100)]
@@ -156,12 +156,12 @@ def test_graph_has_plan_and_memory_nodes(app):
 
 @pytest.fixture(scope="module")
 def corpus(tmp_path_factory):
-    """与 test_duizhang 同构：生产路径建 samples 库。"""
+    """与 test_tally 同构：生产路径建 samples 库。"""
     from pathlib import Path
 
-    from duizhang.index import Corpus
-    from duizhang.ingest import ingest_file, parse_filename
-    from duizhang.store import Store
+    from tally.index import Corpus
+    from tally.ingest import ingest_file, parse_filename
+    from tally.store import Store
     db = tmp_path_factory.mktemp("dz7") / "t.db"
     store = Store(db)
     samples = Path(__file__).resolve().parents[1] / "samples"
@@ -182,7 +182,7 @@ def app(corpus):
 
 @pytest.fixture()
 def fact_store(tmp_path):
-    from duizhang.store import Store
+    from tally.store import Store
     st = Store(tmp_path / "f.db")
     st.add_doc(*_doc_with_fp())
     yield st
@@ -190,8 +190,8 @@ def fact_store(tmp_path):
 
 
 def _doc_with_fp():
-    from duizhang.ingest import Doc
-    from duizhang.schemas import Chunk
+    from tally.ingest import Doc
+    from tally.schemas import Chunk
     doc = Doc(doc_id="欧科亿_2026H1E", company="欧科亿", period="2026H1E",
               kind="业绩预告", source="x.pdf")
     chs = [Chunk(chunk_id="欧科亿_2026H1E#p1#0", doc_id="欧科亿_2026H1E",
@@ -242,10 +242,10 @@ def test_probe_stale_supersedes(fact_store):
 
 
 def test_memory_switch_isolation(monkeypatch):
-    """DZ_MEMORY=off → L1 关闭（eval 隔离语义）；默认开。"""
-    monkeypatch.delenv("DZ_MEMORY", raising=False)
+    """TALLY_MEMORY=off → L1 关闭（eval 隔离语义）；默认开。"""
+    monkeypatch.delenv("TALLY_MEMORY", raising=False)
     assert mem.enabled() is True
-    monkeypatch.setenv("DZ_MEMORY", "off")
+    monkeypatch.setenv("TALLY_MEMORY", "off")
     assert mem.enabled() is False
 
 
@@ -254,7 +254,7 @@ def test_write_gate_requires_verify_pass(app, corpus, monkeypatch):
     注意样本里的欧科亿 2026H1E 是业绩预告（值=36,000~42,000 万元的
     区间，非单值）——metric_rows 解析不出单值、不落账，这是保守失败
     的正确行为，不是缺陷。"""
-    monkeypatch.delenv("DZ_MEMORY", raising=False)
+    monkeypatch.delenv("TALLY_MEMORY", raising=False)
     st = app.invoke(new_state("海伦哲 2026 年一季度归母净利润多少", "heuristic"))
     assert st["verdict"] == "pass"
     key = {"company": "海伦哲", "period": "2026Q1", "metric": "净利",
@@ -274,7 +274,7 @@ def test_write_gate_requires_verify_pass(app, corpus, monkeypatch):
 def test_poisoned_fact_read_not_exempt(app, corpus, monkeypatch):
     """读不豁免（公理 2）：投毒行拼出的答案过不了 verify → 掉头全链路，
     最终答案不含毒值。记忆是误差放大器，读侧闸门是保险丝。"""
-    monkeypatch.delenv("DZ_MEMORY", raising=False)
+    monkeypatch.delenv("TALLY_MEMORY", raising=False)
     poison = _fact(value="9,999,999,999.99")
     con = sqlite3.connect(corpus.db_path)
     with con:

@@ -11,8 +11,8 @@ import json
 import sqlite3
 from pathlib import Path
 
-from duizhang.index import char_text, word_tokens
-from duizhang.schemas import Chunk, Doc
+from tally.index import char_text, word_tokens
+from tally.schemas import Chunk, Doc
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS docs (
@@ -132,7 +132,7 @@ class Store:
         with self.con:
             self._drop_doc_tx(self.con, doc_id)
 
-    # ── 向量层（P1.2 可选路：bge-small-zh @ fastembed，DZ_VEC=off 关闭）──
+    # ── 向量层（P1.2 可选路：bge-small-zh @ fastembed，TALLY_VEC=off 关闭）──
 
     def vec_model(self) -> str:
         """当前向量库绑定的嵌入模型名（空 = 未嵌入）。"""

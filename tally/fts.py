@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from duizhang.schemas import Chunk, Retrieved
+from tally.schemas import Chunk, Retrieved
 
 _CHUNK_COLS = ("ch.chunk_id, ch.doc_id, ch.page, ch.seq, ch.text, "
                "ch.is_table, ch.num_notes")
@@ -36,7 +36,7 @@ def _quote(term: str) -> str:
 def word_expr(query: str) -> str:
     """查询侧清洗：丢单字中文 token（的/年/亿等虚词与切割碎片，
     idf 极低却稀释 MATCH；数字与英文单字保留）。"""
-    from duizhang.index import word_tokens
+    from tally.index import word_tokens
     toks = [t for t in dict.fromkeys(word_tokens(query))
             if not (len(t) == 1 and "\u4e00" <= t <= "\u9fff")]
     return " OR ".join(_quote(t) for t in toks)
@@ -48,7 +48,7 @@ def char_expr(query: str) -> str:
     平移 v0.3 字轨语义：bigram 集合匹配 ≈ 子串命中。不能用空格整段短语——
     「预计净利润多少」在原文里被年份隔开，整段短语永远不命中。
     """
-    from duizhang.index import char_text, word_tokens
+    from tally.index import char_text, word_tokens
     segs = [char_text(t) for t in word_tokens(query)]
     segs = [s for s in segs if len(s) >= 2]
     return " OR ".join(_quote(s) for s in dict.fromkeys(segs))

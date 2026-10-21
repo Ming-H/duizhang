@@ -1,12 +1,12 @@
 """CLI：ingest / ask / eval / docs / index。
 
 用法：
-  python -m duizhang.cli ingest samples/            # 增量摄取（指纹 diff）
-  python -m duizhang.cli ingest data/corpus --watch # 轮询模式
-  python -m duizhang.cli index                      # 为存量 chunks 建/重建 FTS
-  python -m duizhang.cli ask "欧科亿 2026 半年度预计净利润多少"
-  python -m duizhang.cli eval                       # 内置评估集
-  python -m duizhang.cli docs                       # 已入库文档
+  python -m tally.cli ingest samples/            # 增量摄取（指纹 diff）
+  python -m tally.cli ingest data/corpus --watch # 轮询模式
+  python -m tally.cli index                      # 为存量 chunks 建/重建 FTS
+  python -m tally.cli ask "欧科亿 2026 半年度预计净利润多少"
+  python -m tally.cli eval                       # 内置评估集
+  python -m tally.cli docs                       # 已入库文档
 """
 
 from __future__ import annotations
@@ -18,22 +18,22 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-DB = Path(os.environ.get("DZ_DB", "duizhang.db"))
+DB = Path(os.environ.get("TALLY_DB", "tally.db"))
 SAMPLES = Path(__file__).resolve().parents[1] / "samples"
 
 
 def _corpus_from_db():
-    from duizhang.index import Corpus
+    from tally.index import Corpus
     if not DB.exists():
-        sys.exit("未找到 duizhang.db，先运行: python -m duizhang.cli ingest samples/")
+        sys.exit("未找到 tally.db，先运行: python -m tally.cli ingest samples/")
     return Corpus.load(DB)
 
 
 def cmd_ingest(args):
     """增量摄取：扫描 → manifest diff → Store 写入（纯 SQL 增量，无索引重建）。"""
-    from duizhang import source
-    from duizhang.ingest import ingest_file
-    from duizhang.store import Store
+    from tally import source
+    from tally.ingest import ingest_file
+    from tally.store import Store
 
     def one_pass() -> None:
         if getattr(args, "rebuild", False):
@@ -114,7 +114,7 @@ def cmd_ingest(args):
 
 def cmd_index(args):
     """为存量 chunks（重）建 FTS 索引。v0.3 → v0.4 迁移或索引损坏时使用。"""
-    from duizhang.store import Store
+    from tally.store import Store
     store = Store(DB)
 
     def progress(done, total):
@@ -128,10 +128,10 @@ def cmd_index(args):
 def cmd_embed(args):
     """为存量 chunks 嵌入向量（可选第三路 RRF；fastembed + bge-small-zh）。
     增量：只嵌没有向量的块；换模型自动作废旧向量。"""
-    from duizhang import embed
+    from tally import embed
     if not embed.installed():
         sys.exit("向量路不可用：pip install -r requirements-vec.txt")
-    from duizhang.store import Store
+    from tally.store import Store
     store = Store(DB)
     if store.vec_model() != embed.MODEL:
         store.set_vec_model(embed.MODEL)   # 换模型 → 旧向量作废
@@ -156,7 +156,7 @@ def cmd_ask(args):
     import json as _json
     import sys
 
-    from duizhang.graph import ask
+    from tally.graph import ask
     corp = _corpus_from_db()
     st = ask(corp, args.query, mode=args.mode)
     if args.json:                         # 机器态：整态 JSON（脚本消费）
@@ -207,8 +207,8 @@ def cmd_chat(args):
     永不继承自由文本）。/hist 看记忆窗口；exit/quit/Ctrl-D 退出。"""
     import sys
 
-    from duizhang.graph import ask
-    from duizhang.memory import append_turn, summarize_turn
+    from tally.graph import ask
+    from tally.memory import append_turn, summarize_turn
     corp = _corpus_from_db()
     history: list[dict] = []
     print(f"对账 chat（{len(corp.docs)} docs，L0 记忆开；exit 退出）")
@@ -246,7 +246,7 @@ def cmd_chat(args):
 def cmd_eval(args):
     import sys
 
-    from duizhang.evalx import gate_failures, run_eval
+    from tally.evalx import gate_failures, run_eval
     corp = _corpus_from_db()
     summary = run_eval(corp, mode=args.mode, dataset=args.dataset,
                        verbose=not args.json)
@@ -266,7 +266,7 @@ def cmd_eval(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="duizhang", description="对账 — 带证据链的财报 RAG")
+    ap = argparse.ArgumentParser(prog="tally", description="Tally — 答案与原文对上刻痕，才允许出门")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("ingest", help="增量摄取（指纹 diff，自适应新增/修改/删除）")

@@ -2,7 +2,7 @@
 
 import sqlite3
 
-from duizhang.source import diff, scan
+from tally.source import diff, scan
 
 
 def _touch(path, content="x"):
@@ -37,9 +37,9 @@ def _ingest_once(repo_root, work, corpus_dir):
     import os
     import subprocess
     import sys
-    env = {**os.environ, "DZ_DB": str(work / "test.db")}
+    env = {**os.environ, "TALLY_DB": str(work / "test.db")}
     r = subprocess.run(
-        [sys.executable, "-m", "duizhang.cli", "ingest", str(corpus_dir)],
+        [sys.executable, "-m", "tally.cli", "ingest", str(corpus_dir)],
         cwd=repo_root, capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr[-400:]
     return r.stdout
@@ -106,7 +106,7 @@ def test_scan_fingerprint_is_content_hash(tmp_path):
     修前 mtime_ns+size 对前者漏检——语料静默过期，检索答旧数。"""
     import os
 
-    from duizhang import source
+    from tally import source
     f = tmp_path / "a公司_2025年年度报告.md"
     f.write_text("营收 100 万")
     fp1 = source.scan(tmp_path)[str(f)]

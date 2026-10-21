@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import re
 
-from duizhang.index import word_tokens
-from duizhang.ingest import expand_query
-from duizhang.schemas import GraphState, Retrieved
+from tally.index import word_tokens
+from tally.ingest import expand_query
+from tally.schemas import GraphState, Retrieved
 
 _SENT_SPLIT = re.compile(r"(?<=[。；！？])\s*")
 

@@ -53,7 +53,7 @@ LLM 再主导，出口仍是确定性 `verify_citations`。本轮真机联调对
 结构化小任务（理解/评分/改写）关思考：枚举抽取不需要推理，省时省钱。
 生成开思考：碎片化表格证据的数字关联（区分主体区间与「同比增加」
 变动幅度）需要推理——flash 档关思考实测把变动区间误当指标值。
-`DZ_LLM_THINKING=disabled|enabled` 可整体覆盖。仅智谱端点发送该
+`TALLY_LLM_THINKING=disabled|enabled` 可整体覆盖。仅智谱端点发送该
 扩展参数（deepseek 等兼容端点不认识，绝不附加）。
 
 ### D5 provider 与密钥：双通道
@@ -108,7 +108,7 @@ GLM 配置退场（远端通道保留为通用能力）。
 | **原生 /api/chat + `think` 参数** | ✅ 开 14.4s / 关 3.0s | 唯一可靠通道 |
 
 实现：stdlib urllib（零新依赖）。think 默认关（0.8b 开思考延迟 ×5）；
-`DZ_LLM_THINKING=enabled` 打开。环境要求 Ollama ≥ 0.40（0.21 拉不动
+`TALLY_LLM_THINKING=enabled` 打开。环境要求 Ollama ≥ 0.40（0.21 拉不动
 qwen3.5，412 实测）。
 
 ### D8 llm_enabled 语义更新

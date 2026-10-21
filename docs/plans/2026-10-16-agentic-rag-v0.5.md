@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** 把 duizhang 升级为 LLM 主导的 Agentic RAG（Corrective-RAG 模式）：LLM（智谱 GLM）做查询理解/路由/评分/改写/生成，新增多公司对比的查询分解；规则模式降级为兜底与回归基线；`verify_citations` 确定性闸门保持不变。
+**Goal:** 把 tally 升级为 LLM 主导的 Agentic RAG（Corrective-RAG 模式）：LLM（智谱 GLM）做查询理解/路由/评分/改写/生成，新增多公司对比的查询分解；规则模式降级为兜底与回归基线；`verify_citations` 确定性闸门保持不变。
 
 **Architecture:** 在现有 LangGraph 图的入口加 `understand` 节点（LLM 一次结构化抽取 intent/companies/period，规则回退），`route` 变纯函数分发并新增 `compare → decompose` 分支（按公司拆子查询、各自 doc_scope 检索、合并证据），后续 grade/generate/verify 复用既有路径。密钥经 `.env`（gitignored）装载，绝不入库。
 
@@ -14,20 +14,20 @@
 
 ### Task 1: 密钥装载与 zhipu provider 默认值（llm.py + .env + .gitignore）
 
-**Files:** Modify `duizhang/llm.py`, `.gitignore`; Create `.env`（本地，不提交）
+**Files:** Modify `tally/llm.py`, `.gitignore`; Create `.env`（本地，不提交）
 
-1. `.gitignore` 追加 `.env`（先做，防误提交）→ 写 `.env`（DZ_LLM_API_KEY / DZ_LLM_BASE_URL / DZ_LLM_MODEL=glm-4.6）
+1. `.gitignore` 追加 `.env`（先做，防误提交）→ 写 `.env`（TALLY_LLM_API_KEY / TALLY_LLM_BASE_URL / TALLY_LLM_MODEL=glm-4.6）
 2. TDD：
    - test：`_load_dotenv(path)` 读 tmp .env → 环境获得键值且不覆盖已有环境变量
    - test：默认 base_url 含 `open.bigmodel.cn/api/paas/v4`、默认 model `glm-4.6`
    - test：`_parse_json` 剥 ```json 围栏、取首个 {...}
-   - test：`_chat_kwargs()`（私有）对 bigmodel 端点附加 `extra_body={"thinking":{"type":"disabled"}}`，其它端点不附加；`DZ_LLM_THINKING=enabled` 时不附加
+   - test：`_chat_kwargs()`（私有）对 bigmodel 端点附加 `extra_body={"thinking":{"type":"disabled"}}`，其它端点不附加；`TALLY_LLM_THINKING=enabled` 时不附加
 3. 实现：模块导入时 `_load_dotenv(Path(".env"))`（不存在则跳过）；`chat_json` 用 `_parse_json`；`chat_*` 组装 extra_body
 4. 全套测试绿 → commit `feat(llm): 智谱 GLM 默认 provider + .env 装载 + JSON 容错解析`
 
 ### Task 2: auto 模式解析（schemas.py / cli.py / graph.ask）
 
-**Files:** Modify `duizhang/schemas.py`（`new_state` 支持 auto）、`duizhang/graph.py:ask`、`duizhang/cli.py`（choices 加 auto 且默认 auto）
+**Files:** Modify `tally/schemas.py`（`new_state` 支持 auto）、`tally/graph.py:ask`、`tally/cli.py`（choices 加 auto 且默认 auto）
 
 - test：无 key 时 `new_state("q","auto")` 解析为 heuristic；monkeypatch `llm_enabled→True` 时解析为 llm；trace 记录 `mode:heuristic(auto)`
 - CLI `ask/eval --mode {auto,llm,heuristic}` 默认 auto
@@ -35,7 +35,7 @@
 
 ### Task 3: understand 节点（LLM 结构化查询理解，规则回退）
 
-**Files:** Modify `duizhang/graph.py`、`duizhang/schemas.py`（state 加 `understanding`）
+**Files:** Modify `tally/graph.py`、`tally/schemas.py`（state 加 `understanding`）
 
 - 规则版 `_rule_understand(query, corpus)`：公司=语料公司名全部命中（多公司支持，替代只回首个的 `_doc_filter`）、period=`period_hints` 首个、intent=既有摘要/指标词规则 + compare 判定（「对比/比较/vs/哪家」且公司≥2）
 - LLM 版：一次 `chat_json` 抽取 `{"intent":"metric|summary|compare|other","companies":[...],"period":"H1|Q1|Q3|FY|","reason":"..."}`；异常 → 规则回退 + trace `understand:llm→fallback`
@@ -44,7 +44,7 @@
 
 ### Task 4: route 纯函数化 + compare 分支 + retrieve 消费 understanding
 
-**Files:** Modify `duizhang/graph.py`
+**Files:** Modify `tally/graph.py`
 
 - route：消费 `understanding["intent"]` 分发 metric/summary/compare/other；期间守卫（年份 vs 语料）保留；route 不再直接调 LLM（省一次调用，heuristic 关键词逻辑已上移 understand）
 - retrieve：`doc_scope` 由 understanding 的 companies+period 构建（公司名单精确匹配 docs.company，子串匹配仍兜底 doc_id）；无公司则不过滤；scoped 空回退 raw（语义同 v0.4.1）
@@ -54,7 +54,7 @@
 
 ### Task 5: decompose 多跳分解节点
 
-**Files:** Modify `duizhang/graph.py`
+**Files:** Modify `tally/graph.py`
 
 - intent=compare：每公司子查询 `f"{company} {原query}"` → expand_query → corpus.search(doc_scope=该公司+期间, k=4) → 按公司交错合并 → `state["hits"]`；trace `decompose:A|B → N hits`
 - 边：decompose → grade_docs（复用纠错环/生成/verify）
@@ -63,7 +63,7 @@
 
 ### Task 6: eval 双数据集 + judge expect_docs
 
-**Files:** Modify `duizhang/evalx.py`、`duizhang/cli.py`；Create `evals/dataset-agent.json`
+**Files:** Modify `tally/evalx.py`、`tally/cli.py`；Create `evals/dataset-agent.json`
 
 - `run_eval(corpus, mode, dataset_path=None)`；CLI `eval --dataset {default,agent}`
 - judge 支持 `expect_docs` 列表：每个期望 doc 都需在 hits 或 citations 中出现

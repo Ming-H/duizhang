@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 对账 duizhang — 全量测试一条龙
+# 对账 tally — 全量测试一条龙
 #
 # 用法：
 #   ./run_tests.sh           全量（pytest + ruff + 七数据集评估 + 冒烟断言，约 5 分钟）
@@ -29,7 +29,7 @@ head() { printf "\n\033[1m%s\033[0m\n" "$1"; }
 printf "对账全量测试报告  %s\n" "$(date '+%Y-%m-%d %H:%M:%S')"
 printf "git: %s ｜ 语料库: %s\n" \
     "$(git rev-parse --short HEAD 2>/dev/null || echo '-')" \
-    "$($PY -m duizhang.cli docs 2>/dev/null | tail -1)"
+    "$($PY -m tally.cli docs 2>/dev/null | tail -1)"
 
 # ── 1. 静态检查 + 单元测试 ─────────────────────────────
 head "① ruff 静态检查"
@@ -45,7 +45,7 @@ fi
 # ── 2. 真值评估集 ─────────────────────────────────────
 eval_dataset() {  # eval_dataset <名> <是否校验refusal>
     local ds="$1" chk_ref="$2" out
-    out=$($PY -m duizhang.cli eval $MODE --dataset "$ds" --json 2>/dev/null \
+    out=$($PY -m tally.cli eval $MODE --dataset "$ds" --json 2>/dev/null \
         | $PY -c "
 import json,sys
 s=json.load(sys.stdin)
@@ -71,7 +71,7 @@ fi
 # ── 3. 冒烟问答断言（真值对库核对过） ──────────────────
 ask_check() {  # ask_check <描述> <问题> <类型:kw|refused|trend> <期望关键词>
     local desc="$1" q="$2" kind="$3" want="$4" out verdict
-    out=$($PY -m duizhang.cli ask "$q" $MODE --json 2>/dev/null)
+    out=$($PY -m tally.cli ask "$q" $MODE --json 2>/dev/null)
     verdict=$(printf '%s' "$out" | $PY -c "import json,sys;print(json.load(sys.stdin).get('verdict',''))" 2>/dev/null)
     case "$kind" in
       kw)     if printf '%s' "$out" | grep -q "$want"; then ok "$desc → $want"

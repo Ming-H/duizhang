@@ -9,5 +9,5 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _no_real_llm(monkeypatch):
-    monkeypatch.delenv("DZ_LLM_API_KEY", raising=False)
-    monkeypatch.setenv("DZ_LLM_BASE_URL", "https://placeholder.invalid/v1")
+    monkeypatch.delenv("TALLY_LLM_API_KEY", raising=False)
+    monkeypatch.setenv("TALLY_LLM_BASE_URL", "https://placeholder.invalid/v1")

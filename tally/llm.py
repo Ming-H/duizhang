@@ -6,7 +6,7 @@ v0.5.1 起 LLM 默认走本地（qwen3.5:0.8b @ Ollama）——全本地 Agentic
 通道选择（按 base_url 自动判定）：
 - 本地端点（localhost/127.0.0.1）→ Ollama **原生 /api/chat**：
   OpenAI 兼容端点实测忽略 think 参数、思考吃光 max_tokens 致正文为空；
-  原生端点 think 有效（结构化调用默认关，DZ_LLM_THINKING=enabled 打开）
+  原生端点 think 有效（结构化调用默认关，TALLY_LLM_THINKING=enabled 打开）
 - 含 /api/anthropic → Anthropic Messages 协议（常思模型注意思考计入
   max_tokens，此通道预算 ×8）
 - 其余 → OpenAI 兼容 chat/completions
@@ -50,7 +50,7 @@ _load_dotenv()   # 导入即装载（仓库根/当前目录的 .env，不存在�
 
 
 def _base_url() -> str:
-    return os.environ.get("DZ_LLM_BASE_URL", DEFAULT_BASE_URL)
+    return os.environ.get("TALLY_LLM_BASE_URL", DEFAULT_BASE_URL)
 
 
 def _use_local() -> bool:
@@ -59,7 +59,7 @@ def _use_local() -> bool:
 
 def llm_enabled() -> bool:
     """本地端点免鉴权（无 key 即启用）；远端端点需要 key。"""
-    if os.environ.get("DZ_LLM_API_KEY"):
+    if os.environ.get("TALLY_LLM_API_KEY"):
         return True
     return _use_local()
 
@@ -80,8 +80,8 @@ def _http_post_json(url: str, payload: dict, timeout: int = 300) -> dict:
 def _local_think() -> bool:
     """本地思考默认关：0.8b 开思考延迟约 ×5（14s vs 3s，实测）且吃光
     预算；结构化抽取靠规则兜底，生成弱由 verify 闸门降级抽取式——
-    系统纪律本来就兜得住。DZ_LLM_THINKING=enabled 可打开试质量。"""
-    return os.environ.get("DZ_LLM_THINKING", "disabled") == "enabled"
+    系统纪律本来就兜得住。TALLY_LLM_THINKING=enabled 可打开试质量。"""
+    return os.environ.get("TALLY_LLM_THINKING", "disabled") == "enabled"
 
 
 def _local_chat(system: str, user: str, max_tokens: int) -> str:
@@ -89,7 +89,7 @@ def _local_chat(system: str, user: str, max_tokens: int) -> str:
     if base.endswith("/v1"):
         base = base[: -len("/v1")]
     r = _http_post_json(f"{base}/api/chat", {
-        "model": os.environ.get("DZ_LLM_MODEL", DEFAULT_MODEL),
+        "model": os.environ.get("TALLY_LLM_MODEL", DEFAULT_MODEL),
         "stream": False,
         "think": _local_think(),
         "options": {"temperature": 0, "num_predict": _max_tokens(max_tokens)},
@@ -112,7 +112,7 @@ def _client():
     # v0.6.8 延迟治理：远端尾延迟实测 20s+（zhipu 偶发慢响应），无超时
     # 会把单问拖到 30s+；SDK 层 60s 超时 + 1 次重试砍长尾
     return OpenAI(
-        api_key=os.environ.get("DZ_LLM_API_KEY", "local"),
+        api_key=os.environ.get("TALLY_LLM_API_KEY", "local"),
         base_url=_base_url(),
         timeout=60.0, max_retries=1,
     )
@@ -121,24 +121,24 @@ def _client():
 @lru_cache(maxsize=1)
 def _client_anthropic():
     from anthropic import Anthropic  # 延迟导入：仅 Anthropic 端点需要
-    return Anthropic(api_key=os.environ["DZ_LLM_API_KEY"], base_url=_base_url())
+    return Anthropic(api_key=os.environ["TALLY_LLM_API_KEY"], base_url=_base_url())
 
 
 def _anthropic_text(system: str, user: str, max_tokens: int) -> str:
     """Anthropic Messages 协议单轮调用。注意：新版 SDK 无 temperature
     参数；常思模型思考计入 max_tokens——512 会被思考吃光导致正文为空
-    （实测），此通道预算 ×8（DZ_LLM_MAX_TOKENS 显式设置时不放大）。"""
+    （实测），此通道预算 ×8（TALLY_LLM_MAX_TOKENS 显式设置时不放大）。"""
     r = _client_anthropic().messages.create(
-        model=os.environ.get("DZ_LLM_MODEL", DEFAULT_MODEL),
-        max_tokens=_max_tokens(max_tokens * 8 if not os.environ.get("DZ_LLM_MAX_TOKENS") else max_tokens),
+        model=os.environ.get("TALLY_LLM_MODEL", DEFAULT_MODEL),
+        max_tokens=_max_tokens(max_tokens * 8 if not os.environ.get("TALLY_LLM_MAX_TOKENS") else max_tokens),
         system=system,
         messages=[{"role": "user", "content": user}])
     return "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
 
 
 def _max_tokens(default: int) -> int:
-    """DZ_LLM_MAX_TOKENS 可覆盖输出预算。"""
-    return int(os.environ.get("DZ_LLM_MAX_TOKENS", default))
+    """TALLY_LLM_MAX_TOKENS 可覆盖输出预算。"""
+    return int(os.environ.get("TALLY_LLM_MAX_TOKENS", default))
 
 
 def _parse_json(raw: str) -> dict:
@@ -172,7 +172,7 @@ def chat_json(system: str, user: str, max_tokens: int = 512) -> dict:
     if _use_anthropic():
         return _parse_json(_anthropic_text(system, user, max_tokens))
     resp = _client().chat.completions.create(
-        model=os.environ.get("DZ_LLM_MODEL", DEFAULT_MODEL),
+        model=os.environ.get("TALLY_LLM_MODEL", DEFAULT_MODEL),
         messages=[{"role": "system", "content": system},
                   {"role": "user", "content": user}],
         temperature=0,
@@ -188,7 +188,7 @@ def chat_text(system: str, user: str, max_tokens: int = 800) -> str:
     if _use_anthropic():
         return _anthropic_text(system, user, max_tokens)
     resp = _client().chat.completions.create(
-        model=os.environ.get("DZ_LLM_MODEL", DEFAULT_MODEL),
+        model=os.environ.get("TALLY_LLM_MODEL", DEFAULT_MODEL),
         messages=[{"role": "system", "content": system},
                   {"role": "user", "content": user}],
         temperature=0.2,
@@ -208,7 +208,7 @@ def chat_with_tools(messages: list[dict], tools: list[dict],
     if base.endswith("/v1"):
         base = base[: -len("/v1")]
     r = _http_post_json(f"{base}/api/chat", {
-        "model": os.environ.get("DZ_LLM_MODEL", DEFAULT_MODEL),
+        "model": os.environ.get("TALLY_LLM_MODEL", DEFAULT_MODEL),
         "stream": False,
         "think": _local_think(),
         "tools": tools,

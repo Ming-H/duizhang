@@ -2,7 +2,7 @@
 
 > 版本：2026-10-18。与 `evals/dataset-innolight.json` 配套——**期望答案全部
 > 取自财报原文（ground truth）**，非模型输出。一条命令可复现：
-> `python -m duizhang.cli eval --dataset innolight`（工作库 =
+> `python -m tally.cli eval --dataset innolight`（工作库 =
 > data/中际旭创 十份财报）。
 
 ## 1. 真值表（从原文「主要会计数据」节逐期提取）
@@ -98,7 +98,7 @@
 来自数据行）三组实测全过，但 0.8b 语义级不可靠——+90.05% 说成
 「大幅回落」、+69.40% 说成「暴跌」、累计/单季混淆、编造产能归因。
 数字对 ≠ 结论对，语义闸门无法机械化。**分析层默认关闭**
-（`DZ_TREND_ANALYSIS=enabled` 开启，建议配 glm-5.3 级模型）；
+（`TALLY_TREND_ANALYSIS=enabled` 开启，建议配 glm-5.3 级模型）；
 骨架的同比数据本身即客观分析。
 
 ### 两轮测试累计逼出的修复（全部已入库，各带回归测试）

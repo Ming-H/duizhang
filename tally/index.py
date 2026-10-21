@@ -14,8 +14,8 @@ from pathlib import Path
 
 import jieba
 
-from duizhang import fts
-from duizhang.schemas import Chunk, Doc, Retrieved
+from tally import fts
+from tally.schemas import Chunk, Doc, Retrieved
 
 _CUT = jieba.lcut
 _TOKEN_STRIP = re.compile(r"[\s，。；：、！？（）()《》【】\[\]{}\"'“”‘’,.'']")
@@ -60,7 +60,7 @@ class Corpus:
             return []
         # 向量第三路（P1.2 可选）：依赖在 + 库已嵌入才生效，否则 None
         # → fts.search 双轨行为不变
-        from duizhang import embed
+        from tally import embed
         extra = None
         if embed.enabled():
             extra = embed.ranking(self._con, self.docs, query,

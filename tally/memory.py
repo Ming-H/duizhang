@@ -10,11 +10,11 @@ metric, caliber)。**写闸** = verdict=pass ∧ 口径闸未触发；**读不�
 算子 noop/insert/conflict/restated/reingest 见 Store.write_fact；失效
 = 语料指纹（probe 时校验，公理 6）。
 
-L2 固定语义资产：duizhang/assets/semantic_assets.json——alias / 口径
+L2 固定语义资产：tally/assets/semantic_assets.json——alias / 口径
 词典等检索导航知识（非答案事实）；晋升闸 = 人工编辑 + eval 全绿。
 
-开关：DZ_MEMORY（默认开；off = v0.6.5 行为）。eval 默认隔离台账
-（DZ_EVAL_MEMORY=on 才放开）——防止把检索能力测成记忆命中。
+开关：TALLY_MEMORY（默认开；off = v0.6.5 行为）。eval 默认隔离台账
+（TALLY_EVAL_MEMORY=on 才放开）——防止把检索能力测成记忆命中。
 """
 
 from __future__ import annotations
@@ -51,8 +51,8 @@ _METRIC_HINTS = ("净利", "营收", "收入", "扣非", "资产", "利润", "�
 
 
 def enabled() -> bool:
-    """DZ_MEMORY 总闸（默认开）。off = 退回 v0.6.5 无记忆行为。"""
-    return os.environ.get("DZ_MEMORY", "").strip().lower() != "off"
+    """TALLY_MEMORY 总闸（默认开）。off = 退回 v0.6.5 无记忆行为。"""
+    return os.environ.get("TALLY_MEMORY", "").strip().lower() != "off"
 
 
 def metric_lexicon(text: str) -> dict | None:
@@ -105,7 +105,7 @@ def _open_store(corpus):
     db = getattr(corpus, "db_path", "")
     if not db:
         return None
-    from duizhang.store import Store
+    from tally.store import Store
     return Store(db)          # SCHEMA 幂等：老库首次开自动建 verified_facts
 
 
@@ -143,7 +143,7 @@ def write_fact(corpus, fact: dict) -> str:
 def fact_citations(corpus, fact: dict) -> list:
     """台账行 citations [{doc_id, page, quote}] → 证据 Chunk 列表
     （quote 即当年 verify 过的证据行——缓存证据非结论的「证据」半边）。"""
-    from duizhang.schemas import Chunk
+    from tally.schemas import Chunk
     out = []
     for c in fact.get("citations") or []:
         page = int(c.get("page") or 0)

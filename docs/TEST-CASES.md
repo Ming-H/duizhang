@@ -1,8 +1,8 @@
-# 对账 duizhang 测试用例手册
+# Tally 测试用例手册
 
 > 版本：v0.6.2（2026-10-18）。工作库 = 中际旭创三年十期（data/中际旭创，
 > 7,873 chunks）；LLM = 本地 Ollama qwen3.5:0.8b（默认 auto 模式）。
-> 全部命令在项目根目录执行；带 `DZ_DB=` 的用临时库，不影响工作库。
+> 全部命令在项目根目录执行；带 `TALLY_DB=` 的用临时库，不影响工作库。
 
 ## 0. 测试分层
 
@@ -53,14 +53,14 @@
 
 | 编号 | 命令 | 预期 | 关键检查点 |
 |---|---|---|---|
-| MC-E1 | `python -m duizhang.cli ask "中际旭创 2026 半年报营收" --mode heuristic` | ~1 秒抽取式作答，零 LLM 依赖 | 断 Ollama（`brew services stop ollama`）也应正常 |
+| MC-E1 | `python -m tally.cli ask "中际旭创 2026 半年报营收" --mode heuristic` | ~1 秒抽取式作答，零 LLM 依赖 | 断 Ollama（`brew services stop ollama`）也应正常 |
 | MC-E2 | 停掉 Ollama 后 `ask "..."`（默认 auto） | understand/agent 全部 fallback 到规则，答案仍产出 | trace 出现 `understand:llm→fallback`、`agent:fallback`（正常降级，非故障） |
 
 ### F. 语料管理
 
 | 编号 | 命令 | 预期 |
 |---|---|---|
-| MC-F1 | `python -m duizhang.cli ingest data/中际旭创` | `= 无变化 10 docs / 7873 chunks`（幂等） |
+| MC-F1 | `python -m tally.cli ingest data/中际旭创` | `= 无变化 10 docs / 7873 chunks`（幂等） |
 | MC-F2 | 往 `data/中际旭创/` 加新 PDF 后 ingest | `+N 新增`，秒级；多根共存（samples 与中际旭创互不清除） |
 
 ---
@@ -86,11 +86,11 @@
 
 ```bash
 rm -rf /tmp/dz_eval && mkdir /tmp/dz_eval
-DZ_DB=/tmp/dz_eval/t.db python -m duizhang.cli ingest samples/
-DZ_DB=/tmp/dz_eval/t.db python -m duizhang.cli eval --mode heuristic          # ①
-DZ_DB=/tmp/dz_eval/t.db python -m duizhang.cli eval --mode heuristic --dataset agent   # ②
-DZ_DB=/tmp/dz_eval/t.db python -m duizhang.cli eval --mode llm --dataset agent         # ③
-DZ_DB=/tmp/dz_eval/t.db python -m duizhang.cli eval --mode llm               # ④
+TALLY_DB=/tmp/dz_eval/t.db python -m tally.cli ingest samples/
+TALLY_DB=/tmp/dz_eval/t.db python -m tally.cli eval --mode heuristic          # ①
+TALLY_DB=/tmp/dz_eval/t.db python -m tally.cli eval --mode heuristic --dataset agent   # ②
+TALLY_DB=/tmp/dz_eval/t.db python -m tally.cli eval --mode llm --dataset agent         # ③
+TALLY_DB=/tmp/dz_eval/t.db python -m tally.cli eval --mode llm               # ④
 ```
 
 **基准线（任一低于即回归，禁提交）**：
@@ -149,7 +149,7 @@ DZ_DB=/tmp/dz_eval/t.db python -m duizhang.cli eval --mode llm               # �
 ```bash
 pytest                                                          # ① 67 用例
 （§3 四连评估）                                                  # ② 基准不破
-python -m duizhang.cli ask "中际旭创最近几个季度营收的趋势，值得投资吗"   # ③ trend 冒烟
-python -m duizhang.cli ask "中际旭创 2027 年净利润多少"            # ④ 守卫冒烟
+python -m tally.cli ask "中际旭创最近几个季度营收的趋势，值得投资吗"   # ③ trend 冒烟
+python -m tally.cli ask "中际旭创 2027 年净利润多少"            # ④ 守卫冒烟
 git push                                                        # ⑤ CI 兜底
 ```

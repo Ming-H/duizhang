@@ -1,4 +1,4 @@
-"""对账 duizhang — 核心数据模型。
+"""对账 tally — 核心数据模型。
 
 命名「对账」：RAG 的每个答案都要能对账——逐句挂引用，引用必可回溯到
 财报原文的页与段；对不上的答案宁可拒答，也不编。
@@ -109,7 +109,7 @@ def new_state(query: str, mode: str = "auto", history: list[dict] | None = None)
     """mode=auto：有 key 走 llm（LLM 是大脑），无 key 走 heuristic（兜底）。
     history：L0 会话记忆（cli chat 传入；单发 ask 不带）。"""
     if mode == "auto":
-        from duizhang import llm
+        from tally import llm
         mode = "llm" if llm.llm_enabled() else "heuristic"
         trace = ["start", f"mode:{mode}"]
     else:

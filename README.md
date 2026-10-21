@@ -1,6 +1,8 @@
-# 对账 duizhang 🧾
+# Tally 🪵
 
-[![CI](https://github.com/Ming-H/duizhang/actions/workflows/ci.yml/badge.svg)](https://github.com/Ming-H/duizhang/actions/workflows/ci.yml)
+> 答案与原文对上刻痕，才允许出门。
+
+[![CI](https://github.com/Ming-H/tally/actions/workflows/ci.yml/badge.svg)](https://github.com/Ming-H/tally/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > **RAG 的每个答案都要能对账。**
@@ -35,29 +37,29 @@
 | **多公司泛化** | 简称归一（茅台→贵州茅台）、行级抽取、断词修复——任意丢一家 A 股公司财报进语料即插即用 | 贵州茅台 10 份零调参 9/9 双脑全绿 |
 | **确定性优先** | trend 走确定性期间遍历；单季数 Q2=H1−Q1 / Q4=FY−Q3 是原币精度差分算子+出口重算，**禁止模型心算** | 算术也是事实（封闭世界） |
 | **双大脑** | LLM 模式与零 key 规则模式（heuristic）同一张图；LLM 故障逐点退规则并留 trace 标记 | heuristic 是可复现的回归基线 |
-| **评测内建** | 7 数据集 / 84 题；retrieval@3 · answer hit · refusal · citation_coverage · chunk P/R@8 · steps waste_rate | `python -m duizhang.cli eval` 一条命令复现 |
+| **评测内建** | 7 数据集 / 84 题；retrieval@3 · answer hit · refusal · citation_coverage · chunk P/R@8 · steps waste_rate | `python -m tally.cli eval` 一条命令复现 |
 | **观测性三档** | 产品态（pass 静默）/ `-v` 诊断态（trace 每节点带耗时，stderr）/ `--json` 机器态（整态+行级 rows） | 修前/修后对比可脚本化 |
 
 ## 30 秒跑起来
 
 ```bash
 pip install -r requirements.txt            # 精确复现已测环境改用 requirements.lock.txt
-python -m duizhang.cli ingest samples/     # 摄取样例财报（3 家公司 5 份文件）
-python -m duizhang.cli ask "欧科亿 2026 年半年度预计净利润多少"
-python -m duizhang.cli eval                # 内置评估集，一条命令复现
+python -m tally.cli ingest samples/     # 摄取样例财报（3 家公司 5 份文件）
+python -m tally.cli ask "欧科亿 2026 年半年度预计净利润多少"
+python -m tally.cli eval                # 内置评估集，一条命令复现
 ```
 
 规则模式（heuristic）零依赖零 key 即可用——上面三条命令不需要任何 LLM 配置。要上 LLM 大脑见下节。
 
 ## LLM 配置：三档通道
 
-所有配置写 `.env`（已 gitignore，绝不进 git）。通道由 `DZ_LLM_BASE_URL` 自动识别，**换脑不改代码**：
+所有配置写 `.env`（已 gitignore，绝不进 git）。通道由 `TALLY_LLM_BASE_URL` 自动识别，**换脑不改代码**：
 
 | 档位 | 端点 | 需要 | 说明 |
 |---|---|---|---|
 | 0（默认） | `http://localhost:11434/v1` | 装 [Ollama](https://ollama.com) ≥0.40 + pull 模型 | 零 key 零费用零外呼；原生 `/api/chat` 支持 think 参数（默认关，开约 ×5 延迟） |
-| 1 | 任意 OpenAI 兼容端点 | `DZ_LLM_API_KEY` + `BASE_URL` | deepseek / 智谱 `/api/paas/v4` / GLM Coding Plan `/api/coding/paas/v4` / gpt 等 |
-| 2 | Anthropic 兼容端点 | `DZ_LLM_API_KEY` + `BASE_URL` | 如 `https://open.bigmodel.cn/api/anthropic`；thinking 计入 max_tokens → 预算自动 ×8 |
+| 1 | 任意 OpenAI 兼容端点 | `TALLY_LLM_API_KEY` + `BASE_URL` | deepseek / 智谱 `/api/paas/v4` / GLM Coding Plan `/api/coding/paas/v4` / gpt 等 |
+| 2 | Anthropic 兼容端点 | `TALLY_LLM_API_KEY` + `BASE_URL` | 如 `https://open.bigmodel.cn/api/anthropic`；thinking 计入 max_tokens → 预算自动 ×8 |
 
 ```bash
 cp .env.example .env    # 按注释填三行即可切档
@@ -65,9 +67,9 @@ cp .env.example .env    # 按注释填三行即可切档
 
 ```bash
 # 档位 1 示例：智谱 Coding Plan（本仓实测通道）
-DZ_LLM_API_KEY=你的key
-DZ_LLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
-DZ_LLM_MODEL=glm-5.3
+TALLY_LLM_API_KEY=你的key
+TALLY_LLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
+TALLY_LLM_MODEL=glm-5.3
 ```
 
 **通道能力差异**：ReAct 工具循环（agent_research）目前**仅本地档位生效**（Ollama 原生 tools）；远端档位 metric/compare 自动走固定管线兜底——答案同闸（verify 不豁免），但步级观测/幂等缓存不参与（DESIGN-v0.7 §8 实测记录）。
@@ -76,31 +78,31 @@ DZ_LLM_MODEL=glm-5.3
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `DZ_LLM_API_KEY` | 空 | 只存 `.env`；本地端点免 key |
-| `DZ_LLM_BASE_URL` | localhost:11434 | 通道识别（本地 / OpenAI 兼容 / Anthropic 兼容） |
-| `DZ_LLM_MODEL` | `qwen3.5:0.8b` | 编排假设不绑档位——换大档叙述上移，闸门兜底不变 |
-| `DZ_LLM_MAX_TOKENS` | 按档位 | 生成 token 预算 |
-| `DZ_LLM_THINKING` | `disabled` | 仅影响生成；结构化调用永远关 |
-| `DZ_DB` | `./duizhang.db` | SQLite 库路径 |
-| `DZ_TREND_ANALYSIS` | 未设=叙述开 | 三态：默认数字闸+方向闸双闸兜底；`enabled` 加深度投资分析；`off` 骨架直出（逃生门） |
-| `DZ_SELF_CHECK` | 开 | LLM 裁判非对称信任：只能否决不能解锁；`off` 省一次调用 |
-| `DZ_MEMORY` | 开 | L1 事实台账总闸；`off` 退无记忆行为 |
-| `DZ_EVAL_MEMORY` | 隔离 | eval 内默认隔离台账，`on` 显式放开（防止把检索能力测成记忆命中） |
-| `DZ_VEC` | 关 | 向量第三路 RRF（需 `requirements-vec.txt` + `cli embed`）；消融实测数字/口径题净负，opt-in 实验 |
+| `TALLY_LLM_API_KEY` | 空 | 只存 `.env`；本地端点免 key |
+| `TALLY_LLM_BASE_URL` | localhost:11434 | 通道识别（本地 / OpenAI 兼容 / Anthropic 兼容） |
+| `TALLY_LLM_MODEL` | `qwen3.5:0.8b` | 编排假设不绑档位——换大档叙述上移，闸门兜底不变 |
+| `TALLY_LLM_MAX_TOKENS` | 按档位 | 生成 token 预算 |
+| `TALLY_LLM_THINKING` | `disabled` | 仅影响生成；结构化调用永远关 |
+| `TALLY_DB` | `./tally.db` | SQLite 库路径 |
+| `TALLY_TREND_ANALYSIS` | 未设=叙述开 | 三态：默认数字闸+方向闸双闸兜底；`enabled` 加深度投资分析；`off` 骨架直出（逃生门） |
+| `TALLY_SELF_CHECK` | 开 | LLM 裁判非对称信任：只能否决不能解锁；`off` 省一次调用 |
+| `TALLY_MEMORY` | 开 | L1 事实台账总闸；`off` 退无记忆行为 |
+| `TALLY_EVAL_MEMORY` | 隔离 | eval 内默认隔离台账，`on` 显式放开（防止把检索能力测成记忆命中） |
+| `TALLY_VEC` | 关 | 向量第三路 RRF（需 `requirements-vec.txt` + `cli embed`）；消融实测数字/口径题净负，opt-in 实验 |
 
 ## CLI 一览
 
 ```bash
-python -m duizhang.cli ingest samples/            # 增量摄取（manifest 指纹 diff，幂等）
-python -m duizhang.cli ingest data/corpus --watch # 轮询模式：每 60s 增量同步
-python -m duizhang.cli ask "对比欧科亿和海伦哲 2026 一季度谁赚得多"   # 多跳对比
-python -m duizhang.cli ask "茅台 2026 半年度扣非净利润多少" -v        # 诊断态：trace 每节点耗时
-python -m duizhang.cli ask "…" --json            # 机器态：整态 JSON
-python -m duizhang.cli chat                      # 多轮对话（L0 记忆：追问继承公司/期间/指标/年份）
-python -m duizhang.cli docs                      # 已入库文档清单
-python -m duizhang.cli index                     # 为存量 chunks 重建 FTS
-python -m duizhang.cli embed                     # 可选向量第三路（需 requirements-vec.txt）
-python -m duizhang.cli eval [--mode m] [--dataset d] [--json]
+python -m tally.cli ingest samples/            # 增量摄取（manifest 指纹 diff，幂等）
+python -m tally.cli ingest data/corpus --watch # 轮询模式：每 60s 增量同步
+python -m tally.cli ask "对比欧科亿和海伦哲 2026 一季度谁赚得多"   # 多跳对比
+python -m tally.cli ask "茅台 2026 半年度扣非净利润多少" -v        # 诊断态：trace 每节点耗时
+python -m tally.cli ask "…" --json            # 机器态：整态 JSON
+python -m tally.cli chat                      # 多轮对话（L0 记忆：追问继承公司/期间/指标/年份）
+python -m tally.cli docs                      # 已入库文档清单
+python -m tally.cli index                     # 为存量 chunks 重建 FTS
+python -m tally.cli embed                     # 可选向量第三路（需 requirements-vec.txt）
+python -m tally.cli eval [--mode m] [--dataset d] [--json]
 ```
 
 `-v` 诊断态示例（stderr，产品态 pass 时静默）：
@@ -186,7 +188,7 @@ e=5%、g=2%、20 步 → ≤2%（朴素模型 36% 失败），且失败形态=�
 ## 项目结构
 
 ```
-duizhang/
+tally/
 ├── schemas.py      # GraphState（窄接口状态）+ Doc/Chunk/Citation/Retrieved
 ├── source.py       # 语料扫描 + manifest 三态 diff（增量账本）
 ├── ingest.py       # 文件名元数据 / 表格感知分块 / 页眉剥离 / 数字归一化 / 查询扩展
@@ -230,11 +232,11 @@ docs/               # 设计文档 ×5 + 导览 + 测试手册 + 评估集设计
 能。三选一：规则模式（零 LLM，`--mode heuristic`）；任意 OpenAI 兼容远端；Anthropic 兼容远端。`.env` 三行切换，见[上表](#llm-配置三档通道)。
 
 **怎么换模型档位？**
-改 `DZ_LLM_MODEL` 一行。编排假设不绑档位——小档靠闸门兜底，大档叙述上移；实测记录见 DESIGN-v0.5 D7 与各评估表。
+改 `TALLY_LLM_MODEL` 一行。编排假设不绑档位——小档靠闸门兜底，大档叙述上移；实测记录见 DESIGN-v0.5 D7 与各评估表。
 
 **怎么用自己的财报？**
 ```bash
-python -m duizhang.cli ingest /path/to/财报目录
+python -m tally.cli ingest /path/to/财报目录
 ```
 PDF 按巨潮命名「公司_2025年年度报告.pdf」；md/txt 主干必须是公司名。解析不出公司名的文件 ⚠ 拒收，不静默入库。
 
