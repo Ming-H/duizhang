@@ -8,6 +8,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20   # 正常全程几分钟；卡死止损（默认上限 6 小时）
     steps:
       - uses: actions/checkout@v4
 

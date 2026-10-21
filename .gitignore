@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 duizhang.db
 .pytest_cache/
+.ruff_cache/
 .DS_Store
 
 data/*

@@ -39,7 +39,7 @@
 ## 30 秒跑起来
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt            # 精确复现已测环境改用 requirements.lock.txt
 python -m duizhang.cli ingest samples/     # 摄取样例财报（3 家公司 5 份文件）
 python -m duizhang.cli ask "欧科亿 2026 年半年度预计净利润多少"
 python -m duizhang.cli eval                # 内置评估集，一条命令复现
@@ -260,4 +260,6 @@ PDF 按巨潮命名「公司_2025年年度报告.pdf」；md/txt 主干必须是
 
 ## License
 
-MIT
+代码：[MIT](LICENSE) · Copyright © 2026 Ming-H。
+
+语料版权另论：`data/` 下的财报 PDF 来自巨潮资讯网公开披露，版权归原作者与披露主体，随库携带仅用于本仓库的可复现评测（CI 真值冒烟）；对外分发本仓库前应移除语料或另行取得授权。
