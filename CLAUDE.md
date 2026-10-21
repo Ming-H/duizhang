@@ -25,6 +25,7 @@ python -m duizhang.cli eval --json         # 机器态：summary+行级 rows（�
 python -m duizhang.cli eval                          # default dataset (10 单跳; CI regression)
 python -m duizhang.cli eval --mode llm --dataset agent     # agent dataset (multi-hop; fine on the default local tier)
 python -m duizhang.cli eval --dataset innolight      # 中际旭创真值 31 题（事实/趋势/陷阱/鲁棒；CI 冒烟）
+python -m duizhang.cli eval --dataset innolight --min-retrieval 1.0 --min-hit 1.0   # CI 门槛：低于即非零退出（ci.yml 已挂）
 python -m duizhang.cli eval --dataset maotai         # 贵州茅台真值 9 题（简称/口径/断词泛化）
 python -m duizhang.cli eval --dataset quarters       # v0.7 单季差分派生 8 题（Q2=H1−Q1 / Q4=FY−Q3）
 python -m duizhang.cli eval --dataset multihop       # v0.7 多跳 8 题（跨年双值/三公司/多指标族）
