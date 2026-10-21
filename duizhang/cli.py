@@ -244,13 +244,25 @@ def cmd_chat(args):
 
 
 def cmd_eval(args):
-    from duizhang.evalx import run_eval
+    import sys
+
+    from duizhang.evalx import gate_failures, run_eval
     corp = _corpus_from_db()
     summary = run_eval(corp, mode=args.mode, dataset=args.dataset,
                        verbose=not args.json)
     if args.json:                         # 机器态：summary+行级 rows
         import json as _json
         print(_json.dumps(summary, ensure_ascii=False, default=str))
+    # CI 门槛（数字为真批）：传了 --min-* 即低于阈值非零退出——修前
+    # eval 永远 exit 0，CI 三集只防崩溃不防退化。None 门槛不判。
+    mins = dict(min_retrieval=args.min_retrieval, min_hit=args.min_hit,
+                min_refusal=args.min_refusal)
+    if any(v is not None for v in mins.values()):
+        fails = gate_failures(summary, **mins)
+        if fails:
+            print(f"✗ eval 门槛未过（dataset={args.dataset}）：\n  "
+                  + "\n  ".join(fails), file=sys.stderr)
+            sys.exit(1)
 
 
 def main():
@@ -291,6 +303,13 @@ def main():
     p.add_argument("--mode", default="auto", choices=["auto", "llm", "heuristic"])
     p.add_argument("--json", action="store_true",
                    help="机器态：summary+行级 rows 的 JSON（修前/修后对比脚本用）")
+    p.add_argument("--min-retrieval", type=float, default=None,
+                   dest="min_retrieval",
+                   help="CI 门槛：retrieval@3 低于此值以非零码退出（不传不判）")
+    p.add_argument("--min-hit", type=float, default=None, dest="min_hit",
+                   help="CI 门槛：answer_hit 低于此值以非零码退出（不传不判）")
+    p.add_argument("--min-refusal", type=float, default=None, dest="min_refusal",
+                   help="CI 门槛：refusal 低于此值以非零码退出（无陷阱题集 N/A 不判）")
     p.add_argument("--dataset", default="default",
                    choices=["default", "agent", "innolight", "maotai",
                             "multihop", "multiturn", "quarters"],

@@ -33,7 +33,7 @@
 | **多公司泛化** | 简称归一（茅台→贵州茅台）、行级抽取、断词修复——任意丢一家 A 股公司财报进语料即插即用 | 贵州茅台 10 份零调参 9/9 双脑全绿 |
 | **确定性优先** | trend 走确定性期间遍历；单季数 Q2=H1−Q1 / Q4=FY−Q3 是原币精度差分算子+出口重算，**禁止模型心算** | 算术也是事实（封闭世界） |
 | **双大脑** | LLM 模式与零 key 规则模式（heuristic）同一张图；LLM 故障逐点退规则并留 trace 标记 | heuristic 是可复现的回归基线 |
-| **评测内建** | 7 数据集 / 58 题；retrieval@3 · answer hit · refusal · faithfulness · chunk P/R@8 · steps waste_rate | `python -m duizhang.cli eval` 一条命令复现 |
+| **评测内建** | 7 数据集 / 84 题；retrieval@3 · answer hit · refusal · citation_coverage · chunk P/R@8 · steps waste_rate | `python -m duizhang.cli eval` 一条命令复现 |
 | **观测性三档** | 产品态（pass 静默）/ `-v` 诊断态（trace 每节点带耗时，stderr）/ `--json` 机器态（整态+行级 rows） | 修前/修后对比可脚本化 |
 
 ## 30 秒跑起来
@@ -158,7 +158,7 @@ e=5%、g=2%、20 步 → ≤2%（朴素模型 36% 失败），且失败形态=�
 | retrieval@3 | 期望文档进入 top-3 检索 |
 | answer hit | 答案命中人工核对的原文关键词（真值集逐题 SQL 对库核对） |
 | refusal | 陷阱题（未来期间/语料外/领域外）是否正确拒答；无陷阱集记 N/A |
-| faithfulness | 非拒答题中 verify pass 占比 / 平均引用覆盖率 |
+| citation_coverage | 非拒答题中 verify pass 占比 / 平均引用覆盖率（原名 faithfulness——测的是引用对账，不是语义忠实度，v0.7 改名） |
 | chunk P/R@8 | 真值承载块（doc∈期望 ∧ 含关键词）在 top-8 的占比与命中下界 |
 | steps | ReAct 步级观汇总：calls/new/dup/empty + `waste_rate=(dup+empty)/calls` |
 
@@ -193,7 +193,7 @@ duizhang/
 ├── memory.py       # Memory 三层（L0 会话 / L1 事实台账 / L2 语义资产）
 ├── answer.py       # 抽取式生成 + 口径配对降权 + 引用覆盖率校验（对账闸门）
 ├── llm.py          # LLM 层：三档通道自动识别 / .env 装载 / 思考分层
-├── evalx.py        # 评估 runner（judge 纯函数；7 数据集；steps/faithfulness/chunk P/R）
+├── evalx.py        # 评估 runner（judge 纯函数；7 数据集；steps/citation_coverage/chunk P/R）
 └── cli.py          # ingest / ask / chat / docs / index / embed / eval（-v/--json 三档观测）
 tests/              # 120 用例（conftest 封网：永不外呼 LLM）
 evals/              # 7 数据集 58 题（default/agent/innolight/maotai/quarters/multihop/multiturn）

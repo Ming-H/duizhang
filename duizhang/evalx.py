@@ -10,7 +10,9 @@ v0.7 新增：
 · steps_summary —— ReAct 步级观汇总（calls/new/dup/empty/waste_rate）：
   dup/empty 占比 = 步级浪费率，eₖ（步错率）的可测代理（DESIGN-v0.7
   §3 度量先行；gₖ 闸门逃生率的出口 = verify verdict 分布，已由
-  faithfulness_pass 承担）
+  citation_coverage 承担——原名 faithfulness_pass，v0.7 后期改名：
+  该指标测的是答案数字句能否在证据池找到出处（引用覆盖率），
+  不是语义级 faithfulness，名不副实会在评审里被拆穿）
 · multiturn 数据集 —— 轮间带 L0 会话记忆的连续问答（每 case 是一串
   turns，判定按轮）
 · eval 默认隔离 L1 台账（DZ_MEMORY=off）——防止把检索能力测成记忆
@@ -24,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 DATASET_DIR = Path(__file__).resolve().parents[1] / "evals"
@@ -47,17 +50,37 @@ def _docs_in_state(expect: str, st: dict) -> bool:
             or any(expect in c for c in st.get("citations", [])))
 
 
+def _kw_in(kw: str, answer: str) -> bool:
+    """关键词在场判定：数字类只守左边界（前邻不得是数字），其余子串。
+
+    假命中类实测全在左侧数字粘连：「3.6」以子串命中「13.68」、
+    「36,000」命中「136,000」——修前 any(k in answer) 的 OR 子串
+    语义可被页码/日期/邻近值巧合骗过。**右侧放行是数据集约定**：
+    关键词普遍前缀截断（「51.7」对 51.71 亿=小数精度延续、「38,239」
+    对 38,239,935,640=千分位延续、「1,568,385,287」对 …287.19），
+    右边界一禁即误杀（innolight「2024 全年净利润」题实测 0.963，
+    门槛当场抓回）。非数字关键词（公司名/指标词）保持子串。
+    """
+    if re.search(r"\d", kw):
+        return re.search(rf"(?<!\d){re.escape(kw)}", answer) is not None
+    return kw in answer
+
+
 def judge(case: dict, st: dict) -> dict:
     """单题判定（纯函数，便于测试与自定义评估集复用）。
 
     检索命中的两条通道都要认：metric 路由填 hits，summary 路由不检索
     但填 citations——只看 hits 会把摘要题系统性判死。对比题
     expect_docs 列表：每个期望文档都要在场，只中一家不算过。
+    forbid_keywords（可选）：答案出现明确不该出现的值（如问扣非却
+    答了归母数）→ 一票否决——单测层负向断言能力上移到 eval 层。
     """
     answer = st.get("answer", "")
     hits = st.get("hits", [])
     top1_doc = hits[0].chunk.doc_id if hits else ""
-    kw_hit = any(k in answer for k in case.get("expect_keywords", []))
+    kw_hit = any(_kw_in(k, answer) for k in case.get("expect_keywords", []))
+    if kw_hit and any(_kw_in(f, answer) for f in case.get("forbid_keywords", [])):
+        kw_hit = False
     expect_docs = case.get("expect_docs") or ([case["expect_doc"]] if case.get("expect_doc") else [])
     doc_hit = (not expect_docs) or all(_docs_in_state(d, st) for d in expect_docs)
     refused = st.get("verdict") == "refused"
@@ -96,7 +119,7 @@ def chunk_pr(case: dict, st: dict, k: int = 8) -> dict | None:
 
 def summarize(rows: list[dict], states: list[dict], mode: str, dataset: str,
               prs: list[dict] | None = None) -> dict:
-    """汇总三指标 + faithfulness + chunk 级 P/R + 步级浪费率（纯函数）。"""
+    """汇总三指标 + citation_coverage + chunk 级 P/R + 步级浪费率（纯函数）。"""
     answered = [(r, s) for r, s in zip(rows, states)
                 if not r["expect_refused"]]
     n_ans = max(1, len(answered))
@@ -118,7 +141,7 @@ def summarize(rows: list[dict], states: list[dict], mode: str, dataset: str,
                      "dup": n_dup, "empty": n_empty,
                      "waste_rate": round((n_dup + n_empty) / len(gates), 3)
                      if gates else 0.0}
-    return dict(
+    out = dict(
         mode=mode,
         dataset=dataset,
         cases=len(rows),
@@ -127,13 +150,34 @@ def summarize(rows: list[dict], states: list[dict], mode: str, dataset: str,
         refusal=(round(sum(1 for r in rows
                            if r["expect_refused"] and r["refused"]) / n_ref, 3)
                  if n_ref else None),
-        faithfulness_pass=round(
+        citation_coverage=round(
             sum(1 for _, s in answered if s.get("verdict") == "pass") / n_ans, 3),
         mean_coverage=round(sum(covs) / len(covs), 3) if covs else 0.0,
         steps=steps_summary,
         **{"chunk_p@8": round(sum(p["p"] for p in prs) / len(prs), 3) if prs else 0.0,
            "chunk_r@8": round(sum(p["r"] for p in prs) / len(prs), 3) if prs else 0.0},
     )
+    return out
+
+
+def gate_failures(summary: dict, min_retrieval: float | None = None,
+                  min_hit: float | None = None,
+                  min_refusal: float | None = None) -> list[str]:
+    """CI 门槛（纯函数）：指标低于阈值返回失败说明列表（空=过闸）。
+
+    cmd_eval 据此以非零码退出——修前 eval 永远 exit 0，CI 三集
+    只防崩溃不防退化（命中率跌到 0.3 依然全绿）。refusal=None
+    （无陷阱题集）不判：口径不适用，硬判会把 N/A 打成 0。
+    """
+    fails: list[str] = []
+    if min_retrieval is not None and summary["retrieval_top3"] < min_retrieval:
+        fails.append(f"retrieval_top3={summary['retrieval_top3']} < {min_retrieval}")
+    if min_hit is not None and summary["answer_hit"] < min_hit:
+        fails.append(f"answer_hit={summary['answer_hit']} < {min_hit}")
+    if (min_refusal is not None and summary.get("refusal") is not None
+            and summary["refusal"] < min_refusal):
+        fails.append(f"refusal={summary['refusal']} < {min_refusal}")
+    return fails
 
 
 def run_eval(corpus, mode: str = "auto", verbose: bool = True,
@@ -191,7 +235,7 @@ def run_eval(corpus, mode: str = "auto", verbose: bool = True,
                   f"  retrieval@3={summary['retrieval_top3']}"
                   f"  answer_hit={summary['answer_hit']}"
                   f"  refusal={summary['refusal'] if summary['refusal'] is not None else 'N/A'}"
-                  f"  faithfulness(pass/cov)={summary['faithfulness_pass']}"
+                  f"  citation_coverage(pass/cov)={summary['citation_coverage']}"
                   f"/{summary['mean_coverage']}"
                   f"  chunk P/R@8={summary['chunk_p@8']}/{summary['chunk_r@8']}"
                   f"  steps={summary['steps']}")

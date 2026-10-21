@@ -31,7 +31,7 @@ jobs:
         run: |
           python -m duizhang.cli ingest samples/
           python -m duizhang.cli ask "欧科亿 2026 年半年度预计净利润多少"
-          python -m duizhang.cli eval
+          python -m duizhang.cli eval --min-retrieval 1.0 --min-hit 1.0
 
       # 真值三集冒烟：随 git 入库的双语料（中际旭创 26MB + 贵州茅台
       # 10MB）+ samples 同库——47 题真值（innolight 31 事实/趋势/陷阱/
@@ -44,6 +44,8 @@ jobs:
           python -m duizhang.cli ingest samples/
           python -m duizhang.cli ingest data/中际旭创
           python -m duizhang.cli ingest data/贵州茅台
-          python -m duizhang.cli eval --mode heuristic --dataset innolight
-          python -m duizhang.cli eval --mode heuristic --dataset quarters
-          python -m duizhang.cli eval --mode heuristic --dataset multihop
+          # --min-* 门槛低于即非零退出：CI 从「只防崩溃」升级为「防指标
+          # 退化」（修前 eval 恒 exit 0，命中率跌穿 CI 依然全绿）
+          python -m duizhang.cli eval --mode heuristic --dataset innolight --min-retrieval 1.0 --min-hit 1.0 --min-refusal 1.0
+          python -m duizhang.cli eval --mode heuristic --dataset quarters --min-retrieval 1.0 --min-hit 1.0
+          python -m duizhang.cli eval --mode heuristic --dataset multihop --min-retrieval 1.0 --min-hit 1.0
