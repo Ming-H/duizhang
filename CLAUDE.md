@@ -34,7 +34,7 @@ python -m duizhang.cli index            # (re)build FTS for existing chunks
 python -m duizhang.cli embed            # 可选向量第三路：嵌入存量 chunks（需 requirements-vec.txt）
 
 # Tests / lint
-pytest                                  # 130 cases; conftest blocks all real LLM calls
+pytest                                  # 123 cases; conftest blocks all real LLM calls
 pytest tests/test_store.py::test_readd_after_drop_no_ghost   # one test
 ruff check .                            # lint (CI enforces)
 ```
