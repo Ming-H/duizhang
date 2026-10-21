@@ -13,6 +13,8 @@
 
 新读者从这里开始：**[docs/INTRODUCTION.md](docs/INTRODUCTION.md) — 项目导览**。
 
+📚 **配套教程**：[《动手学 Agent RAG》](https://github.com/Ming-H/hands-on-agent-rag)——以本项目为唯一载体的 13 章系统教程（13 个破坏性实验 + 40 道真值题）。
+
 ## 目录
 
 - [核心特性](#核心特性)
