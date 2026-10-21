@@ -70,6 +70,8 @@ DZ_LLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
 DZ_LLM_MODEL=glm-5.3
 ```
 
+**通道能力差异**：ReAct 工具循环（agent_research）目前**仅本地档位生效**（Ollama 原生 tools）；远端档位 metric/compare 自动走固定管线兜底——答案同闸（verify 不豁免），但步级观测/幂等缓存不参与（DESIGN-v0.7 §8 实测记录）。
+
 **完整环境变量参考**：
 
 | 变量 | 默认 | 说明 |

@@ -437,3 +437,40 @@ doc 跑一遍过闸抽取预填 L1（Letta sleep-time compute 的语料版）。
 | 未过闸的中间抽取 | verify 前的一切都是待验品，不是记忆 |
 | 对话的向量嵌入检索 | 自由文本回写不可闸（§5 已列） |
 | 用户偏好/画像 | 非事实域，v0.7 不需要——列为「允许但不做」，防 scope 蔓延 |
+
+## 8. eₖ/gₖ 实测记录（2026-10-21，远端档位）
+
+> §4 Phase 1 验收红线「eₖ/gₖ 表在真机产出一份」的兑现记录。本机无
+> Ollama，用 .env 远端档位（智谱 GLM Coding Plan / glm-5.3）先跑
+> gₖ 侧；eₖ 步级表需要本地通道（见 8.1 发现），如实标注待测。
+
+### 8.1 汇总（agent 集 8 题，DZ_MEMORY=off，与 eval 隔离口径一致）
+
+| 观测 | 值 | 说明 |
+|---|---|---|
+| verdict 分布（gₖ 代理） | **pass 6 / refused 2** | 陷阱题（2030 期间/域外）全拒，无 degraded |
+| ReAct 步级（eₖ 代理） | **0 步/0 调用** | 远端通道不进 agent 环（见下），waste_rate=0 是**无观测不是无浪费** |
+| 路由 | compare 3 / metric 2 / summary 1 / 陷阱 2 | understand:llm 全部成功（1 题 fallback 后由规则救回） |
+| 平均耗时 | ~8.9s/题（总 71s） | understand 1-2 次调用 + 固定管线 + 生成 |
+
+**发现（比表格本身更有价值）**：远端档位的「llm 模式」实际行为是
+「LLM 理解 + 固定管线检索 + LLM 生成」——`chat_with_tools` 仅本地
+通道实现（llm.py:206 显式 NotImplementedError，qwen3.5:0.8b 本地
+实测可用时设计），metric/compare 全部 `agent:fallback`。四支柱的
+步级观测/幂等缓存/重复收手/工具白名单在远端**不生效**（答案侧无损：
+兜底管线同一 verify 闸门出口）。**待办**：远端 OpenAI 兼容 function
+calling（bigmodel `/v1` 支持 tools）接入后 agent 环才双通道可用，
+eₖ 逐步表以本地通道为准另行产出。
+
+### 8.2 逐题明细（远端档位）
+
+| # | 问题 | verdict | coverage | 耗时 | 路径 |
+|---|---|---|---|---|---|
+| 1 | 对比欧科亿和海伦哲 2026Q1 营业收入 | pass | 0.866 | 15.2s | compare→fallback |
+| 2 | 对比欧科亿和日联科技 2026 半年度预告 | pass | 0.838 | 13.0s | compare→fallback |
+| 3 | 欧科亿和海伦哲哪家 2026Q1 赚得多 | pass | 0.472 | 8.7s | compare→fallback |
+| 4 | 欧科亿 2026 半年度预计净利润 | pass | 0.885 | 6.7s | metric→fallback |
+| 5 | 海伦哲营收变动的主要原因 | pass | 0.565 | 10.1s | metric→fallback |
+| 6 | 总结欧科亿半年度业绩预告 | pass | — | 4.1s | summary |
+| 7 | 欧科亿 2030 年净利润预测 | refused | — | 9.8s | period-guard→refuse |
+| 8 | 今天北京天气怎么样 | refused | — | 3.0s | other→refuse |
