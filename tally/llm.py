@@ -197,13 +197,75 @@ def chat_text(system: str, user: str, max_tokens: int = 800) -> str:
     return resp.choices[0].message.content or ""
 
 
+def _normalize_tool_messages(messages: list[dict]) -> list[dict]:
+    """宽松格式 → OpenAI 协议：assistant.tool_calls 项补 id+type、
+    function.arguments 序列化为 JSON 串；tool 消息按位置顺序补
+    tool_call_id。id 按会话内位置确定性生成（call_1..call_N）——协议
+    只要求单个请求内自洽。不就地修改入参（本地通道继续用宽松格式）。"""
+    out: list[dict] = []
+    pending: list[str] = []
+    n = 0
+    for m in messages:
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            tcs = []
+            for tc in m["tool_calls"]:
+                n += 1
+                cid = f"call_{n}"
+                pending.append(cid)
+                fn = tc.get("function") or {}
+                tcs.append({"id": cid, "type": "function",
+                            "function": {"name": fn.get("name", ""),
+                                         "arguments": json.dumps(
+                                             fn.get("arguments", {}),
+                                             ensure_ascii=False)}})
+            out.append({**m, "tool_calls": tcs})
+        elif m.get("role") == "tool":
+            cid = pending.pop(0) if pending else f"call_{n}"
+            out.append({**m, "tool_call_id": cid})
+        else:
+            out.append(dict(m))
+    return out
+
+
+def _remote_chat_with_tools(messages: list[dict], tools: list[dict],
+                            max_tokens: int) -> dict:
+    """远端 OpenAI 兼容 function calling（v0.7.1；修前显式
+    NotImplementedError，agent 环在远端档位永远 fallback 固定管线——
+    DESIGN-v0.7 §8 记录的通道能力差异自此收口）。归一化契约与本地
+    通道一致；arguments 兼容 SDK 的 JSON 字符串形态。"""
+    resp = _client().chat.completions.create(
+        model=os.environ.get("TALLY_LLM_MODEL", DEFAULT_MODEL),
+        messages=_normalize_tool_messages(messages),
+        temperature=0,
+        max_tokens=_max_tokens(max_tokens),
+        **({"tools": tools} if tools else {}))
+    m = resp.choices[0].message
+    calls = []
+    for tc in (getattr(m, "tool_calls", None) or []):
+        fn = getattr(tc, "function", None)
+        args = getattr(fn, "arguments", "{}") if fn is not None else "{}"
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError:
+                args = {}
+        calls.append({"name": getattr(fn, "name", "") if fn is not None else "",
+                      "arguments": args or {}})
+    return {"content": m.content or "", "tool_calls": calls}
+
+
 def chat_with_tools(messages: list[dict], tools: list[dict],
                     max_tokens: int = 1024) -> dict:
-    """工具调用单步原语（本地 Ollama 原生 tools；qwen3.5:0.8b 实测可用）。
-    返回归一化 {content: str, tool_calls: [{name, arguments: dict}]}——
-    arguments 兼容字符串/缺省形态。远端模式不支持工具：调用方回退固定管线。"""
+    """工具调用单步原语（双通道）：本地 Ollama 原生 tools（qwen3.5:0.8b
+    实测可用）/ 远端 OpenAI 兼容 function calling（v0.7.1）。返回归一化
+    {content: str, tool_calls: [{name, arguments: dict}]}——arguments 兼容
+    字符串/缺省形态。Anthropic 兼容通道仍未接（Messages 协议 tool_use
+    块格式不同，显式失败优于半成品转换）：调用方回退固定管线。"""
     if not _use_local():
-        raise NotImplementedError("tools 仅本地通道支持（远端走固定管线）")
+        if _use_anthropic():
+            raise NotImplementedError(
+                "tools 暂不支持 Anthropic 通道（tool_use 块协议不同）")
+        return _remote_chat_with_tools(messages, tools, max_tokens)
     base = _base_url().rstrip("/")
     if base.endswith("/v1"):
         base = base[: -len("/v1")]

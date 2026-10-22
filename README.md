@@ -74,7 +74,7 @@ TALLY_LLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
 TALLY_LLM_MODEL=glm-5.3
 ```
 
-**通道能力差异**：ReAct 工具循环（agent_research）目前**仅本地档位生效**（Ollama 原生 tools）；远端档位 metric/compare 自动走固定管线兜底——答案同闸（verify 不豁免），但步级观测/幂等缓存不参与（DESIGN-v0.7 §8 实测记录）。
+**通道能力**：ReAct 工具循环**双通道**——本地 Ollama 原生 tools 与远端 OpenAI 兼容 function calling（v0.7.1 接通，智谱 glm-5.3 实测 22 次调用/waste_rate 0.227/两例降级全对，DESIGN-v0.7 §8.3）；Anthropic 兼容通道 tools 暂未接（显式失败→固定管线兜底，答案同闸）。
 
 **完整环境变量参考**：
 

@@ -483,3 +483,42 @@ eₖ 逐步表以本地通道为准另行产出。
 历史行文中的 `duizhang`/`DZ_*` 已同步更名以保命令可复现；「对账」
 作为概念词保留。重命名与《动手学 Agent RAG》教程全案见
 `docs/plans/2026-10-21-tally-tutorial-design.md`。
+
+### 8.3 v0.7.1 补记（2026-10-22）：远端 function calling 接通，eₖ/gₖ 表兑现
+
+**变更**：`llm.chat_with_tools` 新增远端 OpenAI 兼容 function calling
+路径（`_remote_chat_with_tools` + `_normalize_tool_messages` 消息规范化：
+宽松格式 → 协议要求的 `id`/`tool_call_id`，按会话位置确定性编号）。
+Anthropic 兼容通道仍显式 NotImplementedError（tool_use 块协议不同，
+显式失败优于半成品转换）。本地通道行为不变。TDD：3 个测试
+（透传与归一化 / 消息规范化不就地污染 / Anthropic 仍拒）。
+
+**实测（智谱 GLM Coding Plan / glm-5.3，agent 集 8 题，
+TALLY_MEMORY=off）——eₖ/gₖ 表，本方案 §4 Phase 1 红线的完整兑现**：
+
+| # | 问题 | 工具调用 | new/dup/empty | waste | verdict | coverage | 耗时 |
+|---|---|---|---|---|---|---|---|
+| 1 | 对比欧科亿/海伦哲 2026Q1 营收 | 2 | 2/0/0 | 0 | degraded | 0.444 | 41s |
+| 2 | 对比欧科亿/日联科技 H1E 预告 | 6 | 5/0/1 | 0.167 | pass | 0.855 | 76s |
+| 3 | 哪家 2026Q1 赚得多 | 2 | 2/0/0 | 0 | degraded | 0.441 | 25s |
+| 4 | 欧科亿 H1E 预计净利润 | 2 | 1/0/1 | 0.5 | pass | 0.728 | 31s |
+| 5 | 海伦哲营收变动原因 | 10 | 7/0/3 | 0.3 | pass | 0.937 | 55s |
+| 6 | 总结欧科亿预告 | 0（summary 路由）| — | — | pass | — | 4s |
+| 7 | 2030 年净利预测 | 0（期间守卫）| — | — | refused | — | 10s |
+| 8 | 北京天气 | 0（other）| — | — | refused | — | 7s |
+
+**汇总**：calls=22 · new=17 · **dup=0** · empty=5 · **waste_rate=0.227** ·
+verdict pass 4 / degraded 2 / refused 2 · 总耗时 248s。
+
+**读数**：
+
+- **eₖ 侧**：glm-5.3 零重复调用（dup=0——0.8b 实测复读 6 步的问题
+  在强档位上不存在，幂等缓存未触发）；浪费全来自 empty（5 次，
+  metrics_table 对预告类文档返回空）。归因题（#5）烧满 10 次预算。
+- **gₖ 侧**：两道 compare 题 degraded（cov≈0.44）——**闸门在真实
+  远端生成路径上的实弹工作证明**：LLM 对比结论句引用覆盖率不足 →
+  降级抽取式，答案仍然全对（安全失败）。§8.1 说的「0.0 阈值的风险
+  只在 LLM 路径显形」，对偶面就是「0.45 阈值的价值也只在 LLM 路径
+  显形」——本表两道 degraded 是它的直接证据。
+- **对照 §8.1**：同一端点三天前 8/8 `agent:fallback`、steps=0；
+  今天 22 次真实工具调用。通道能力差异自此收口为历史记录。
